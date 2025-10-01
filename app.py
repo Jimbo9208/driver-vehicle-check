@@ -1,482 +1,249 @@
-""" Driver Vehicle Check — Flask PWA (Full App) """
-from __future__ import annotations
-import os, io, json, csv, base64, datetime as dt, secrets
-from flask import (Flask, render_template_string, request, redirect, url_for, flash,
-                   send_file, send_from_directory, jsonify, abort)
-from typing import Optional
-from flask import (Flask, render_template_string, request, redirect, url_for, flash,
-                   send_file, jsonify, abort)
+# app.py
+import os
+import io
+import csv
+import json
+import base64
+import secrets
+import datetime as dt
+import threading
+import smtplib
+import socket
+from email.message import EmailMessage
+
+from flask import (
+    Flask, request, redirect, url_for, render_template_string,
+    session, send_from_directory, flash, abort, make_response
+)
 from flask_sqlalchemy import SQLAlchemy
-from flask_wtf import FlaskForm
-from wtforms import StringField, BooleanField, IntegerField, TextAreaField, HiddenField
-from wtforms.validators import DataRequired, Optional as VOptional, NumberRange, Length
 from werkzeug.utils import secure_filename
 from PIL import Image
-from jinja2 import DictLoader
 
+# --------------------------- App / Config ---------------------------
 app = Flask(__name__)
-app.config.update(
-    SECRET_KEY=os.getenv('SECRET_KEY', 'dev-secret'),
-    SQLALCHEMY_DATABASE_URI=os.getenv('DATABASE_URL', 'sqlite:///vehicle_checks.db'),
-    SQLALCHEMY_TRACK_MODIFICATIONS=False,
-    UPLOAD_FOLDER=os.getenv('UPLOAD_FOLDER', 'uploads'),
-    MAX_CONTENT_LENGTH=16 * 1024 * 1024,
-)
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-ALLOWED_EXTENSIONS = {"png","jpg","jpeg","webp"}
 
-DEFAULT_FLEET_EMAIL = "Luke.Taylor@taylor-roofingServices.co.uk"
-def _mail_cfg():
-    return (
-        os.getenv('MAIL_HOST'),
-        int(os.getenv('MAIL_PORT', '587')),
-        os.getenv('MAIL_USER'),
-        os.getenv('MAIL_PASS'),
-        os.getenv('MAIL_TO', DEFAULT_FLEET_EMAIL),
-    )
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret')
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv(
+    'DATABASE_URL', 'sqlite:///app.db'
+).replace('postgres://', 'postgresql://')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-GDRIVE_ENABLED = os.getenv('GDRIVE_ENABLED', '0') == '1'
-GDRIVE_FOLDER_ID = os.getenv('GDRIVE_FOLDER_ID')
-GDRIVE_SA_JSON   = os.getenv('GDRIVE_SERVICE_ACCOUNT_JSON')
+# uploads
+UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'uploads')
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 
-DRIVER_PIN     = os.getenv('DRIVER_PIN', '0000')
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'admin123')
+DRIVER_PIN = os.getenv('DRIVER_PIN', '6633')
+CRON_SECRET = os.getenv('CRON_SECRET', '')
+
+# Email (optional)
+MAIL_HOST = os.getenv('MAIL_HOST', '')
+MAIL_PORT = int(os.getenv('MAIL_PORT', '587'))
+MAIL_USER = os.getenv('MAIL_USER', '')
+MAIL_PASS = os.getenv('MAIL_PASS', '')
+MAIL_TO   = os.getenv('MAIL_TO', MAIL_USER or '')
 
 db = SQLAlchemy(app)
 
+# --------------------------- Models --------------------------------
 class Vehicle(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    reg = db.Column(db.String(16), unique=True, nullable=False)
-    make_model = db.Column(db.String(120))
-    active = db.Column(db.Boolean, default=True)
-    slug = db.Column(db.String(32), unique=True, default=lambda: secrets.token_hex(4))
+    reg = db.Column(db.String(20), unique=True, nullable=False)
+    make_model = db.Column(db.String(120), nullable=True)
+    checks = db.relationship('Check', backref='vehicle', lazy=True)
 
 class Check(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    created_at = db.Column(db.DateTime, default=dt.datetime.utcnow)
-    driver_name = db.Column(db.String(80), nullable=False)
     vehicle_id = db.Column(db.Integer, db.ForeignKey('vehicle.id'), nullable=False)
-    odometer = db.Column(db.Integer)
+    created_at = db.Column(db.DateTime, default=dt.datetime.utcnow)
+    driver_name = db.Column(db.String(120))
+    mileage = db.Column(db.String(40))
     notes = db.Column(db.Text)
-    defects = db.Column(db.Text)
-    safe_to_drive = db.Column(db.Boolean, default=True)
-    signature_path = db.Column(db.String(255))
-    items_json = db.Column(db.Text)
-    vehicle = db.relationship('Vehicle', backref=db.backref('checks', lazy=True))
+    items_json = db.Column(db.Text)  # list[dict]: section,label,status,comment
+    signature_path = db.Column(db.String(255))  # filename only
+    photos = db.relationship('Photo', backref='check', lazy=True, cascade="all,delete")
 
 class Photo(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     check_id = db.Column(db.Integer, db.ForeignKey('check.id'), nullable=False)
-    path = db.Column(db.String(255), nullable=False)
-    drive_file_id = db.Column(db.String(128))
-    check = db.relationship('Check', backref=db.backref('photos', lazy=True))
+    path = db.Column(db.String(255))         # filename only
+    drive_file_id = db.Column(db.String(120))  # reserved (optional)
 
+# --------------------------- Checklist Items ------------------------
 CHECK_ITEMS = [
-    {"section":"Tyre","label":"Tread Depth (min 1.6mm)"},
-    {"section":"Tyre","label":"Inflation Pressure"},
-    {"section":"Tyre","label":"Cracks and Cuts"},
-    {"section":"Engine","label":"Oil Level"},
-    {"section":"Engine","label":"Coolant Level"},
-    {"section":"Engine","label":"Brake Fluid Level"},
-    {"section":"Engine","label":"Clutch Fluid Level"},
-    {"section":"Engine","label":"Battery Water Level"},
-    {"section":"Engine","label":"Steering Fluid"},
-    {"section":"Engine","label":"Fuel"},
-    {"section":"Engine","label":"Battery (not leaking and secure)"},
-    {"section":"Light","label":"Interior"},
-    {"section":"Light","label":"Turn"},
-    {"section":"Light","label":"Reverse"},
-    {"section":"Light","label":"Tail"},
-    {"section":"Light","label":"Emergency"},
-    {"section":"Accessory","label":"Tape/Radio"},
-    {"section":"Control","label":"Horn"},
-    {"section":"Control","label":"Engine Start"},
-    {"section":"Control","label":"Central Lock"},
-    {"section":"Control","label":"Power Window"},
-    {"section":"Control","label":"Heater/AC"},
-    {"section":"Control","label":"Auto/Manual transmission Operation"},
-    {"section":"Control","label":"Brake Operation"},
-    {"section":"Control","label":"Wipers/washers"},
-    {"section":"Control","label":"Steering Operation"},
-    {"section":"Tool","label":"Jack and Wheel Spanner"},
-    {"section":"Tool","label":"First Aid Kit"},
-    {"section":"Exterior","label":"Mirrors and glass"},
-    {"section":"Exterior","label":"Exhaust (doesn’t emit excessive smoke)"},
-    {"section":"Exterior","label":"Body work & Doors (any damage)"},
-    {"section":"Interior","label":"Seats and seatbelts (secure, operate, no damage)"},
+    {"section": "Tyre", "label": "Tyre – Tread Depth (min 1.6mm)"},
+    {"section": "Tyre", "label": "Tyre – Inflation Pressure"},
+    {"section": "Tyre", "label": "Tyre – Cracks and Cuts"},
+    {"section": "Engine", "label": "Engine – Oil Level"},
+    {"section": "Engine", "label": "Engine – Coolant Level"},
+    {"section": "Engine", "label": "Engine – Brake Fluid Level"},
+    {"section": "Engine", "label": "Engine – Clutch Fluid Level"},
+    {"section": "Engine", "label": "Engine – Battery Water Level"},
+    {"section": "Engine", "label": "Engine – Steering Fluid"},
+    {"section": "Engine", "label": "Engine – Fuel"},
+    {"section": "Engine", "label": "Engine – Battery (not leaking and secure)"},
+    {"section": "Light", "label": "Light – Interior"},
+    {"section": "Light", "label": "Light – Turn"},
+    {"section": "Light", "label": "Light – Reverse"},
+    {"section": "Light", "label": "Light – Tail"},
+    {"section": "Light", "label": "Light – Emergency"},
+    {"section": "Accessory", "label": "Accessory – Tape/Radio"},
+    {"section": "Control", "label": "Control – Horn"},
+    {"section": "Control", "label": "Control – Engine Start"},
+    {"section": "Control", "label": "Control – Central Lock"},
+    {"section": "Control", "label": "Control – Power Window"},
+    {"section": "Control", "label": "Control – Heater/AC"},
+    {"section": "Control", "label": "Control – Auto/Manual transmission Operation"},
+    {"section": "Control", "label": "Control – Brake Operation"},
+    {"section": "Control", "label": "Control – Wipers/washers"},
+    {"section": "Control", "label": "Control – Steering Operation"},
+    {"section": "Tool", "label": "Tool – Jack and Wheel Spanner"},
+    {"section": "Tool", "label": "Tool – First Aid Kit"},
+    {"section": "Exterior", "label": "Exterior – Mirrors and glass"},
+    {"section": "Exterior", "label": "Exterior – Exhaust (doesn’t emit excessive smoke)"},
+    {"section": "Exterior", "label": "Exterior – Body work & Doors (any damage)"},
+    {"section": "Interior", "label": "Interior – Seats and seatbelts (secure, operate, no damage)"},
 ]
 
-class CheckForm(FlaskForm):
-    driver_name    = StringField('Driver Name', validators=[DataRequired(), Length(max=80)])
-    vehicle_select = StringField('Vehicle Select')
-    odometer       = IntegerField('Odometer (miles)', validators=[VOptional(), NumberRange(min=0)])
-    safe_to_drive  = BooleanField('Safe to drive')
-    defects        = TextAreaField('Defects found (if any)', validators=[VOptional(), Length(max=1000)])
-    notes          = TextAreaField('Notes', validators=[VOptional(), Length(max=2000)])
-    signature_data = HiddenField('Signature (base64)')
+# --------------------------- Helpers --------------------------------
+def admin_required(fn):
+    from functools import wraps
+    @wraps(fn)
+    def _wrap(*a, **kw):
+        if not session.get('admin'):
+            return redirect(url_for('admin_login'))
+        return fn(*a, **kw)
+    return _wrap
 
-@app.route('/pin', methods=['GET','POST'])
-def pin_gate():
-    if request.method == 'POST':
-        if request.form.get('pin') == DRIVER_PIN:
-            resp = redirect(url_for('new_check'))
-            resp.set_cookie('driver_ok', '1', max_age=3600*8)
-            return resp
-        flash('Incorrect PIN')
-    return render_template_string(TPL_PIN)
+def driver_required(fn):
+    from functools import wraps
+    @wraps(fn)
+    def _wrap(*a, **kw):
+        if not session.get('driver_ok'):
+            return redirect(url_for('pin'))
+        return fn(*a, **kw)
+    return _wrap
 
-@app.route('/admin/login', methods=['GET','POST'])
-def admin_login():
-    if request.method == 'POST':
-        if request.form.get('password') == ADMIN_PASSWORD:
-            resp = redirect(url_for('admin_dashboard'))
-            resp.set_cookie('admin_ok', '1', max_age=3600*8)
-            return resp
-        flash('Incorrect password')
-    return render_template_string(TPL_ADMIN_LOGIN)
-
-@app.route('/manifest.webmanifest')
-def manifest():
-    return jsonify({
-        "name": "Driver Vehicle Check",
-        "short_name": "Vehicle Check",
-        "start_url": "/check",
-        "display": "standalone",
-        "background_color": "#0b0f14",
-        "theme_color": "#0b0f14",
-        "icons": [
-            {"src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
-            {"src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png"}
-        ]
-    })
-
-@app.route('/sw.js')
-def service_worker():
-    js = """
-    const CACHE = 'vehcheck-v3'; // bump version to invalidate old cache
-    const ASSETS = [
-      '/static/logo.png',
-      'https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css',
-      'https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js'
-    ];
-
-    self.addEventListener('install', event => {
-      event.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
-      self.skipWaiting();
-    });
-
-    self.addEventListener('activate', event => {
-      event.waitUntil(
-        caches.keys().then(keys =>
-          Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
-        )
-      );
-      self.clients.claim();
-    });
-
-    self.addEventListener('fetch', event => {
-      const req = event.request;
-      if (req.method !== 'GET') return;
-
-      // For navigations (page loads), use network-first; if offline, basic fallback
-      if (req.mode === 'navigate') {
-        event.respondWith(
-          fetch(req).catch(() =>
-            new Response('<!doctype html><h1>Offline</h1><p>You appear to be offline.</p>', {
-              headers: { 'Content-Type': 'text/html' }
-            })
-          )
-        );
-        return;
-      }
-
-      // For static assets, cache-first; only cache successful (non-redirect) responses
-      const staticDest = ['style','script','image','font'];
-      if (staticDest.includes(req.destination)) {
-        event.respondWith(
-          caches.match(req).then(cached => {
-            if (cached) return cached;
-            return fetch(req).then(resp => {
-              if (resp && resp.ok) {
-                const copy = resp.clone();
-                caches.open(CACHE).then(c => c.put(req, copy));
-              }
-              return resp;
-            });
-          })
-        );
-        return;
-      }
-
-      // Everything else: network passthrough
-      event.respondWith(fetch(req));
-    });
-    """
-    return js, 200, {'Content-Type':'application/javascript'}
-
-@app.route('/')
-def index():
-    return redirect(url_for('new_check'))
-
-@app.route('/check', methods=['GET','POST'])
-def new_check():
-    if request.cookies.get('driver_ok') != '1':
-        return redirect(url_for('pin_gate'))
-    form = CheckForm()
-    vehicles = Vehicle.query.filter_by(active=True).order_by(Vehicle.reg.asc()).all()
-    if request.method == 'POST' and form.validate():
-        sel_reg = (request.form.get('vehicle_select') or '').strip().upper()
-        vehicle = Vehicle.query.filter_by(reg=sel_reg).first()
-        if not vehicle:
-            flash('Please select a valid vehicle registration')
-            return render_template_string(TPL_FORM, form=form, vehicles=vehicles, CHECK_ITEMS=CHECK_ITEMS)
-        c = Check(
-            driver_name=form.driver_name.data.strip(),
-            vehicle_id=vehicle.id,
-            odometer=form.odometer.data,
-            notes=form.notes.data,
-            defects=form.defects.data,
-            safe_to_drive=bool(form.safe_to_drive.data),
-        )
-        items = []
-        for idx, item in enumerate(CHECK_ITEMS):
-            status  = request.form.get(f'item_status_{idx}', '')
-            comment = (request.form.get(f'item_comment_{idx}', '') or '').strip()
-            items.append({'section':item['section'], 'label':item['label'], 'status':status, 'comment':comment})
-        c.items_json = json.dumps(items)
-        sig_data = form.signature_data.data or ''
-        if sig_data.startswith('data:image/png;base64,'):
-            img_b64 = sig_data.split(',')[1]
-            sig_name = f"sig_{dt.datetime.utcnow():%Y%m%d%H%M%S}_{secrets.token_hex(4)}.png"
-            sig_path = os.path.join(app.config['UPLOAD_FOLDER'], sig_name)
-            with open(sig_path, 'wb') as f: f.write(base64.b64decode(img_b64))
-            c.signature_path = sig_name  # store only the filename
-        db.session.add(c)
-        db.session.flush()
-        # Photos
-        files = request.files.getlist('photos')
-        for f in files:
-            try:
-                # skip empty uploads
-                if not f or not getattr(f, 'filename', ''):
-                    continue
-
-                filename = f.filename
-
-                # derive extension safely (no inline ternary)
-                if '.' in filename:
-                    ext = filename.rsplit('.', 1)[1].lower()
-                else:
-                    ext = ''
-
-                if ext not in ALLOWED_EXTENSIONS:
-                    continue
-
-                # save to disk
-                fname = secure_filename(f"{c.id}_{int(dt.datetime.utcnow().timestamp())}_{filename}")
-                fpath = os.path.join(app.config['UPLOAD_FOLDER'], fname)
-                try:
-                    img = Image.open(f.stream)
-                    if img.mode not in ('RGB', 'RGBA'):
-                        img = img.convert('RGB')
-                    img.thumbnail((2000, 2000))
-                    img.save(fpath, optimize=True, quality=85)
-                except Exception:
-                    # fall back to raw write
-                    f.stream.seek(0)
-                    with open(fpath, 'wb') as out:
-                        out.write(f.read())
-
-                # create DB row (store only the filename)
-                photo = Photo(check_id=c.id, path=fname)
-
-                # optional Drive upload
-                if GDRIVE_ENABLED and GDRIVE_FOLDER_ID:
-                    try:
-                        drive_id = upload_to_drive_structured(
-                            fpath, vehicle.reg, dt.datetime.utcnow(), os.path.basename(fpath), 'image/jpeg'
-                        )
-                        photo.drive_file_id = drive_id
-                    except Exception:
-                        app.logger.warning('Drive upload failed for photo', exc_info=True)
-
-                db.session.add(photo)
-
-            except Exception:
-                app.logger.exception('Failed to process uploaded photo')
-
-        # commit once after processing all photos
-        db.session.commit()
-        try:
-            send_submission_email(c, items)
-        except Exception:
-            app.logger.warning('Submission email failed', exc_info=True)
-        flash('Check submitted. Drive safe!')
-        return redirect(url_for('success', check_id=c.id))
-    return render_template_string(TPL_FORM, form=form, vehicles=vehicles, CHECK_ITEMS=CHECK_ITEMS)
-
-@app.route('/success/<int:check_id>')
-def success(check_id):
-    check = Check.query.get_or_404(check_id)
-    return render_template_string(TPL_SUCCESS, check=check)
-
-@app.route('/admin')
-def admin_dashboard():
-    if request.cookies.get('admin_ok') != '1':
-        return redirect(url_for('admin_login'))
-    rows = Check.query.order_by(Check.created_at.desc()).limit(200).all()
-    return render_template_string(TPL_ADMIN, rows=rows)
-
-@app.route('/admin/check/<int:check_id>')
-def admin_check(check_id):
-    if request.cookies.get('admin_ok') != '1':
-        return redirect(url_for('admin_login'))
-    c = Check.query.get_or_404(check_id)
-    items = json.loads(c.items_json or '[]')
-    return render_template_string(TPL_DETAIL, c=c, items=items)
-
-@app.route('/admin/export.csv')
-def export_csv():
-    if request.cookies.get('admin_ok') != '1':
-        return redirect(url_for('admin_login'))
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(['created_at','driver','reg','odometer','safe_to_drive','defects'])
-    for c in Check.query.order_by(Check.created_at.desc()).all():
-        writer.writerow([c.created_at.isoformat(), c.driver_name, c.vehicle.reg, c.odometer or '', c.safe_to_drive, (c.defects or '').replace('\n',' ')[:500]])
-    output.seek(0)
-    return send_file(io.BytesIO(output.getvalue().encode('utf-8')),
-                     mimetype='text/csv', as_attachment=True, download_name='vehicle_checks.csv')
-
-@app.route('/admin/vehicles', methods=['GET','POST'])
-def admin_vehicles():
-    if request.cookies.get('admin_ok') != '1':
-        return redirect(url_for('admin_login'))
-    if request.method == 'POST':
-        reg  = (request.form.get('reg') or '').strip().upper()
-        make = (request.form.get('make_model') or '').strip()
-        if reg:
-            v = Vehicle.query.filter_by(reg=reg).first()
-            if v:
-                flash('Vehicle already exists')
-            else:
-                db.session.add(Vehicle(reg=reg, make_model=make, active=True)); db.session.commit()
-    vs = Vehicle.query.order_by(Vehicle.active.desc(), Vehicle.reg.asc()).all()
-    return render_template_string(TPL_VEHICLES, vehicles=vs)
-
-@app.route('/admin/vehicles/<int:vid>/toggle')
-def toggle_vehicle(vid):
-    if request.cookies.get('admin_ok') != '1':
-        return redirect(url_for('admin_login'))
-    v = Vehicle.query.get_or_404(vid)
-    v.active = not v.active
-    db.session.commit()
-    return redirect(url_for('admin_vehicles'))
-
-@app.route('/admin/vehicles/<int:vid>', methods=['GET','POST'])
-def edit_vehicle(vid):
-    if request.cookies.get('admin_ok') != '1':
-        return redirect(url_for('admin_login'))
-    v = Vehicle.query.get_or_404(vid)
-    if request.method == 'POST':
-        new_reg = (request.form.get('reg') or '').strip().upper()
-        new_mm  = (request.form.get('make_model') or '').strip()
-        if new_reg:
-            taken = Vehicle.query.filter(Vehicle.id != v.id, Vehicle.reg == new_reg).first()
-            if taken:
-                flash('That registration already exists.')
-            else:
-                v.reg = new_reg
-                v.make_model = new_mm
-                db.session.commit()
-                flash('Vehicle updated.')
-                return redirect(url_for('admin_vehicles'))
-    return render_template_string(TPL_VEHICLE_EDIT, v=v)
-
-def _month_start_utc(now: Optional[dt.datetime] = None) -> dt.datetime:
-    now = now or dt.datetime.utcnow()
-    return dt.datetime(now.year, now.month, 1)
-
-def _vehicles_missing_since(since_utc: dt.datetime) -> list[Vehicle]:
-    missing = []
-    for v in Vehicle.query.filter_by(active=True).all():
-        exists = db.session.query(Check.id).filter(Check.vehicle_id==v.id, Check.created_at>=since_utc).first()
-        if not exists:
-            missing.append(v)
-    return missing
-
-def send_text_email(subject: str, body: str) -> bool:
-    import smtplib
-    from email.message import EmailMessage
-    host, port, user, pwd, to = _mail_cfg()
-    if not (host and user and pwd and to):
+def allowed_file(filename: str) -> bool:
+    if not filename or '.' not in filename:
         return False
-    msg = EmailMessage()
-    msg['Subject'] = subject
-    msg['From'] = user
-    msg['To'] = to
-    msg.set_content(body)
-    with smtplib.SMTP(host, port) as s:
-        s.starttls(); s.login(user, pwd); s.send_message(msg)
-    return True
+    return filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def send_monthly_reminder(stage: str) -> bool:
-    stage = stage.lower()
-    labels = {'due':'DUE','amber':'OVERDUE (Amber)','red':'FINAL OVERDUE (Red)'}
-    if stage not in labels: return False
-    start = _month_start_utc()
-    missing = _vehicles_missing_since(start)
-    if not missing: return False
-    lines = [f"- {v.reg}" + (f" — {v.make_model}" if v.make_model else '') for v in missing]
-    body = (f"Monthly vehicle checks — {labels[stage]}\n"
-            f"Month starting {start.date()} (UTC)\n\n"
-            f"Outstanding vehicles ({len(missing)}):\n" + "\n".join(lines) +
-            "\n\nPlease complete a check via the Driver PIN page.")
-    return send_text_email(f"{labels[stage]}: Monthly vehicle checks — {len(missing)} outstanding", body)
-
-@app.route('/cron/monthly/<stage>')
-def cron_monthly(stage):
-    token = request.args.get('token','')
-    if token != os.getenv('CRON_SECRET',''):
-        abort(403)
-    ok = send_monthly_reminder(stage)
-    return jsonify({'sent': bool(ok), 'stage': stage})
-
-@app.route('/cron/weekly/<stage>')
-def cron_weekly(stage):
-    return cron_monthly(stage)
-
-import smtplib
-from email.message import EmailMessage
+# --------------------------- PDF Builder ----------------------------
+from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas as pdfcanvas
 from reportlab.lib.units import mm
-from reportlab.lib.utils import ImageReader
 
-def send_submission_email(check, items):
-    """Send PDF email; never block request if SMTP is slow."""
+def build_pdf_bytes(check: Check, items: list[dict]) -> bytes:
+    """Create a simple PDF summarising the check; return raw bytes."""
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    W, H = A4
+    y = H - 20*mm
+
+    def line(txt, size=10, dy=6*mm):
+        nonlocal y
+        c.setFont("Helvetica", size)
+        c.drawString(20*mm, y, txt)
+        y -= dy
+        if y < 20*mm:
+            c.showPage(); y = H - 20*mm
+
+    # Header
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(20*mm, y, "Vehicle Check")
+    y -= 10*mm
+    vm = f" ({check.vehicle.make_model})" if (check.vehicle and check.vehicle.make_model) else ""
+    line(f"Vehicle: {check.vehicle.reg}{vm}")
+    line(f"Date: {check.created_at.strftime('%Y-%m-%d %H:%M')}")
+    if check.mileage: line(f"Mileage: {check.mileage}")
+    if check.driver_name: line(f"Driver: {check.driver_name}")
+
+    # Items
+    y -= 4*mm
+    c.setFont("Helvetica-Bold", 11); c.drawString(20*mm, y, "Checklist"); y -= 7*mm
+    c.setFont("Helvetica", 10)
+    current_section = None
+    for it in items:
+        sec = it.get('section') or ''
+        if sec and sec != current_section:
+            line(f"[{sec}]", size=11, dy=6*mm)
+            current_section = sec
+        label   = it.get('label', '')
+        status  = (it.get('status') or '').upper() or '-'
+        comment = it.get('comment') or ''
+        line(f"{label} — {status}")
+        if comment:
+            line(f"   Notes: {comment}", size=9, dy=5*mm)
+
+    # Photos
+    if check.photos:
+        y -= 5*mm
+        c.setFont("Helvetica-Bold", 11); c.drawString(20*mm, y, "Photos"); y -= 7*mm
+        x = 20*mm
+        thumb_h = 35*mm
+        for p in check.photos:
+            path = os.path.join(app.config['UPLOAD_FOLDER'], p.path)
+            if os.path.exists(path):
+                try:
+                    c.drawImage(path, x, y - thumb_h, width=50*mm, height=thumb_h,
+                                preserveAspectRatio=True, anchor='sw')
+                    x += 55*mm
+                    if x > W - 60*mm:
+                        x = 20*mm
+                        y -= thumb_h + 8*mm
+                        if y < 30*mm:
+                            c.showPage(); y = H - 20*mm
+                except Exception:
+                    pass
+
+    # Signature
+    if check.signature_path:
+        y -= 10*mm
+        c.setFont("Helvetica-Bold", 11); c.drawString(20*mm, y, "Driver signature"); y -= 7*mm
+        sigp = os.path.join(app.config['UPLOAD_FOLDER'], check.signature_path)
+        if os.path.exists(sigp):
+            try:
+                c.drawImage(sigp, 20*mm, max(20*mm, y - 30*mm), width=60*mm, height=30*mm,
+                            preserveAspectRatio=True, anchor='sw')
+                y -= 35*mm
+            except Exception:
+                pass
+
+    c.showPage(); c.save()
+    pdf = buf.getvalue()
+    buf.close()
+    return pdf
+
+# --------------------------- Email Sending --------------------------
+def send_submission_email(check: Check, items: list[dict]):
+    """Send PDF by email; never block request if SMTP is slow."""
     host = os.getenv('MAIL_HOST')
     if not host:
         app.logger.info('MAIL_HOST not set; skipping email.')
         return
 
     port = int(os.getenv('MAIL_PORT', '587'))
-    user = os.getenv('MAIL_USER')
-    pwd  = os.getenv('MAIL_PASS')
+    user = os.getenv('MAIL_USER', '')
+    pwd  = os.getenv('MAIL_PASS', '')
     to   = os.getenv('MAIL_TO') or user
+    if not user or not pwd or not to:
+        app.logger.info('MAIL_USER/MAIL_PASS/MAIL_TO not fully set; skipping email.')
+        return
 
-    # Build the message and attach the PDF as before
     msg = EmailMessage()
     msg['Subject'] = f"Vehicle Check - {check.vehicle.reg} - {check.created_at:%Y-%m-%d %H:%M}"
     msg['From'] = user
     msg['To'] = to
     msg.set_content("Attached: vehicle check PDF.")
-    pdf_bytes = build_pdf_bytes(check, items)  # your existing PDF builder
+
+    pdf_bytes = build_pdf_bytes(check, items)
     msg.add_attachment(pdf_bytes, maintype='application', subtype='pdf',
                        filename=f"check_{check.id}.pdf")
 
     try:
-        # 10s socket timeout so we don’t hang the worker
         with smtplib.SMTP(host, port, timeout=10) as s:
             s.ehlo()
             s.starttls()
@@ -485,476 +252,260 @@ def send_submission_email(check, items):
         app.logger.info('Submission email sent.')
     except (smtplib.SMTPException, socket.timeout, OSError) as e:
         app.logger.warning(f'Submission email failed: {e}')
-def build_pdf_for_check(c: Check, items: list) -> bytes:
-    buf = io.BytesIO()
-    p = pdfcanvas.Canvas(buf, pagesize=A4)
-    W, H = A4
-    y = H - 20*mm
-    logo_path = os.path.join('static','logo.png')
-    if os.path.exists(logo_path):
-        try: p.drawImage(ImageReader(logo_path), 15*mm, H-25*mm, width=30*mm, height=12*mm, preserveAspectRatio=True, mask='auto')
-        except Exception: pass
-    p.setFont('Helvetica-Bold', 16); p.drawString(50*mm, H-15*mm, 'Daily Vehicle Check Report')
-    p.setFont('Helvetica', 10)
-    p.drawString(15*mm, y, f"Check ID: {c.id}"); y-=6*mm
-    p.drawString(15*mm, y, f"Date/Time (UTC): {c.created_at:%Y-%m-%d %H:%M}"); y-=6*mm
-    p.drawString(15*mm, y, f"Vehicle: {c.vehicle.reg}"); y-=6*mm
-    p.drawString(15*mm, y, f"Driver: {c.driver_name}"); y-=6*mm
-    if c.odometer is not None:
-        p.drawString(15*mm, y, f"Odometer: {c.odometer} miles"); y-=8*mm
-    else:
-        y -= 2*mm
-    p.setFont('Helvetica-Bold', 11)
-    p.drawString(15*mm, y, f"Safe to drive: {'YES' if c.safe_to_drive else 'NO'}"); y-=8*mm
-    p.setFont('Helvetica-Bold', 11); p.drawString(15*mm, y, 'Checklist'); y-=6*mm
-    p.setFont('Helvetica', 9)
-    for it in items:
-        status = it.get('status') or '-'
-        if y < 40*mm: p.showPage(); y = H - 20*mm; p.setFont('Helvetica', 9)
-        p.drawString(15*mm, y, f"{it.get('section')} — {it.get('label')}")
-        p.drawRightString(W-40*mm, y, 'Pass' if status=='pass' else ('Fail' if status=='fail' else '-'))
-        comment = (it.get('comment') or '').strip()
-        if comment:
-            y -= 4*mm; p.setFont('Helvetica-Oblique', 8); p.drawString(20*mm, y, f"Note: {comment[:180]}"); p.setFont('Helvetica', 9)
-        y -= 6*mm
-    if y < 40*mm: p.showPage(); y = H - 20*mm
-    p.setFont('Helvetica-Bold', 11); p.drawString(15*mm, y, 'Defects'); y-=6*mm
-    p.setFont('Helvetica', 9); p.drawString(15*mm, y, (c.defects or '-')); y-=8*mm
-    p.setFont('Helvetica-Bold', 11); p.drawString(15*mm, y, 'Notes'); y-=6*mm
-    p.setFont('Helvetica', 9); p.drawString(15*mm, y, (c.notes or '-')); y-=10*mm
-    if c.photos:
-        p.setFont('Helvetica-Bold', 11); p.drawString(15*mm, y, 'Photos'); y-=6*mm
-        x = 15*mm
-        for ph in c.photos[:4]:
-            try: p.drawImage(ImageReader(ph.path), x, y-35*mm, width=45*mm, height=30*mm, preserveAspectRatio=True, mask='auto')
-            except Exception: pass
-            x += 50*mm
-            if x > W-60*mm: x = 15*mm; y -= 32*mm
-        y -= 36*mm
-    if c.signature_path and os.path.exists(c.signature_path):
-        p.setFont('Helvetica-Bold', 11); p.drawString(15*mm, y, 'Driver Signature'); y-=6*mm
-        try: p.drawImage(ImageReader(c.signature_path), 15*mm, y-20*mm, width=60*mm, height=20*mm, mask='auto')
-        except Exception: pass
-        y -= 24*mm
-    p.showPage(); p.save(); buf.seek(0)
-    return buf.getvalue()
 
-def _drive_service():
-    if not (GDRIVE_ENABLED and GDRIVE_SA_JSON): return None
-    from google.oauth2 import service_account
-    from googleapiclient.discovery import build
-    if os.path.isfile(GDRIVE_SA_JSON):
-        creds = service_account.Credentials.from_service_account_file(GDRIVE_SA_JSON, scopes=['https://www.googleapis.com/auth/drive'])
-    else:
-        creds = service_account.Credentials.from_service_account_info(json.loads(GDRIVE_SA_JSON), scopes=['https://www.googleapis.com/auth/drive'])
-    return build('drive','v3',credentials=creds,cache_discovery=False)
+def send_simple_email(subject: str, body: str):
+    host = os.getenv('MAIL_HOST')
+    if not host:
+        return
+    port = int(os.getenv('MAIL_PORT', '587'))
+    user = os.getenv('MAIL_USER', '')
+    pwd  = os.getenv('MAIL_PASS', '')
+    to   = os.getenv('MAIL_TO') or user
+    if not user or not pwd or not to:
+        return
+    msg = EmailMessage()
+    msg['Subject'] = subject
+    msg['From'] = user
+    msg['To'] = to
+    msg.set_content(body)
+    try:
+        with smtplib.SMTP(host, port, timeout=10) as s:
+            s.ehlo(); s.starttls(); s.login(user, pwd)
+            s.send_message(msg)
+    except Exception as e:
+        app.logger.warning(f'Cron email failed: {e}')
 
-def drive_ensure_folder(svc, name: str, parent_id: Optional[str]) -> str:
-    if not svc: return ''
-    q_name = name.replace("'", "\\'")
-    q = f"name='{q_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
-    if parent_id: q += f" and '{parent_id}' in parents"
-    res = svc.files().list(q=q, fields='files(id,name)', pageSize=1).execute()
-    files = res.get('files', [])
-    if files: return files[0]['id']
-    meta = {'name':name,'mimeType':'application/vnd.google-apps.folder'}
-    if parent_id: meta['parents']=[parent_id]
-    return svc.files().create(body=meta, fields='id').execute()['id']
+# --------------------------- Routes (Driver) ------------------------
+@app.route('/')
+def home():
+    return redirect(url_for('check') if session.get('driver_ok') else url_for('pin'))
 
-def drive_upload(svc, local_path: str, name: str, parent_id: str, mimetype: Optional[str]=None) -> str:
-    if not svc: return ''
-    from googleapiclient.http import MediaFileUpload
-    media = MediaFileUpload(local_path, mimetype=mimetype, resumable=False)
-    meta = {'name':name,'parents':[parent_id]}
-    return svc.files().create(body=meta, media_body=media, fields='id').execute()['id']
+@app.route('/pin', methods=['GET', 'POST'])
+def pin():
+    if request.method == 'POST':
+        if request.form.get('pin') == str(DRIVER_PIN):
+            session['driver_ok'] = True
+            return redirect(url_for('check'))
+        flash('Incorrect PIN')
+    return render_template_string(TPL_PIN)
 
-def upload_to_drive_structured(local_path: str, reg: str, when: dt.datetime, name: str, mimetype: Optional[str]):
-    if not (GDRIVE_ENABLED and GDRIVE_FOLDER_ID): return None
-    svc = _drive_service()
-    reg_folder = drive_ensure_folder(svc, reg, GDRIVE_FOLDER_ID)
-    ym_folder  = drive_ensure_folder(svc, when.strftime('%Y-%m'), reg_folder)
-    return drive_upload(svc, local_path, name, ym_folder, mimetype=mimetype)
+@app.route('/logout')
+def logout():
+    session.pop('driver_ok', None)
+    return redirect(url_for('pin'))
 
-TPL_BASE = r"""
-<!doctype html>
-<html lang="en" data-bs-theme="dark">
-  <head>
-    <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Driver Vehicle Check</title>
-    <link rel="manifest" href="{{ url_for('manifest') }}">
-    <meta name="theme-color" content="#0b0f14">
-    <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-      body {padding-bottom: 60px;}
-      .sig-pad {border:2px dashed #777; border-radius:12px; height:200px;}
-      .photo-input {border:1px dashed #666; padding:12px; border-radius:12px;}
-      .grid-2 {display:grid; grid-template-columns: 1fr 1fr; gap: 8px;}
-      @media (max-width: 640px) {.grid-2 {grid-template-columns: 1fr;}}
-      .logo {height: 28px;}
-    </style>
-  </head>
-  <body class="bg-dark text-light">
-    <nav class="navbar navbar-expand-lg navbar-dark bg-black border-bottom border-secondary sticky-top">
-      <div class="container-fluid">
-        <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('new_check') }}">
-          <img src="/static/logo.png" alt="Logo" class="logo" onerror="this.style.display='none'">
-          <span>🚚 Vehicle Check</span>
-        </a>
-        <div class="d-flex gap-2">
-          <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('admin_dashboard') }}">Admin</a>
-        </div>
-      </div>
-    </nav>
-    <main class="container mt-3">
-      {% with messages = get_flashed_messages() %}
-        {% if messages %}<div class="alert alert-info">{{ messages[0] }}</div>{% endif %}
-      {% endwith %}
-      {% block content %}{% endblock %}
-    </main>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script>
-      const enableSW = !['localhost','127.0.0.1'].includes(location.hostname);
-      if ('serviceWorker' in navigator && enableSW) {
-        window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js'));
-      } else if ('serviceWorker' in navigator) {
-        // Unregister any old SW from earlier runs
-        navigator.serviceWorker.getRegistrations().then(rs => rs.forEach(r => r.unregister()));
-      }
-    </script>
-  </body>
-</html>
-"""
+@app.route('/check', methods=['GET', 'POST'])
+@driver_required
+def check():
+    vehicles = Vehicle.query.order_by(Vehicle.reg).all()
+    if request.method == 'POST':
+        return new_check(vehicles)
+    return render_template_string(
+        TPL_FORM, vehicles=vehicles, CHECK_ITEMS=CHECK_ITEMS
+    )
 
-TPL_PIN = r"""
-{% extends 'TPL_BASE' %}
-{% block content %}
-  <div class="mx-auto" style="max-width:420px;">
-    <h3 class="mb-3">Enter Driver PIN</h3>
-    <form method="post" class="card p-3 bg-secondary-subtle">
-      <input class="form-control form-control-lg mb-3" type="password" name="pin" placeholder="PIN" autofocus required>
-      <button class="btn btn-primary w-100">Continue</button>
-    </form>
-  </div>
-{% endblock %}
-"""
+def new_check(vehicles):
+    reg = request.form.get('vehicle_reg')
+    vehicle = Vehicle.query.filter_by(reg=reg).first()
+    if not vehicle:
+        flash('Please select a vehicle')
+        return render_template_string(TPL_FORM, vehicles=vehicles, CHECK_ITEMS=CHECK_ITEMS)
 
-TPL_ADMIN_LOGIN = r"""
-{% extends 'TPL_BASE' %}
-{% block content %}
-  <div class="mx-auto" style="max-width:420px;">
-    <h3 class="mb-3">Admin Login</h3>
-    <form method="post" class="card p-3 bg-secondary-subtle">
-      <input class="form-control mb-3" type="password" name="password" placeholder="Admin password" required>
-      <button class="btn btn-primary w-100">Login</button>
-    </form>
-  </div>
-{% endblock %}
-"""
+    c = Check(vehicle_id=vehicle.id)
+    c.driver_name = (request.form.get('driver_name') or '').strip()
+    c.mileage = (request.form.get('mileage') or '').strip()
+    c.notes = (request.form.get('notes') or '').strip()
 
-TPL_FORM = r"""
-{% extends 'TPL_BASE' %}
-{% block content %}
-  <h2 class="mb-3">Daily Vehicle Check</h2>
-  <form method="post" enctype="multipart/form-data" class="card p-3 bg-secondary-subtle">
-    {{ form.csrf_token }}
-    <div class="grid-2">
-      <div>
-        <label class="form-label">Driver Name</label>
-        {{ form.driver_name(class_='form-control', placeholder='e.g. Alex Smith') }}
-      </div>
-      <div>
-        <label class="form-label">Vehicle Registration</label>
-        <select class="form-select text-uppercase" name="vehicle_select" required>
-          <option value="" selected disabled>Select registration</option>
-          {% for v in vehicles %}
-            <option value="{{ v.reg }}" data-mm="{{ v.make_model or '' }}">{{ v.reg }}{% if v.make_model %} — {{ v.make_model }}{% endif %}</option>
-          {% endfor %}
-        </select>
-      </div>
-    </div>
-    <div class="grid-2 mt-2">
-      <div>
-        <label class="form-label">Make / Model</label>
-        <input id="mm" class="form-control" type="text" placeholder="Auto-filled" readonly>
-      </div>
-      <div>
-        <label class="form-label">Odometer (miles)</label>
-        {{ form.odometer(class_='form-control', placeholder='e.g. 41250') }}
-      </div>
-    </div>
-    <div class="form-check mt-3">
-      {{ form.safe_to_drive(class_='form-check-input', id='safe') }}
-      <label class="form-check-label" for="safe">Safe to drive</label>
-    </div>
-    <hr>
-    <h5 class="mt-2">Checklist</h5>
-  {% for item in CHECK_ITEMS %}
-  {% if not loop.first and (item.section != CHECK_ITEMS[loop.index0-1].section) %}
-    <hr class="my-2">
-  {% endif %}
-  {% if loop.first or (item.section != CHECK_ITEMS[loop.index0-1].section) %}
-    <h6 class="text-info mt-2">{{ item.section }}</h6>
-  {% endif %}
+    # items
+    items = []
+    for idx, it in enumerate(CHECK_ITEMS):
+        status = request.form.get(f'item_status_{idx}', '')
+        comment = (request.form.get(f'item_comment_{idx}', '') or '').strip()
+        items.append({'section': it['section'], 'label': it['label'],
+                      'status': status, 'comment': comment})
+    c.items_json = json.dumps(items)
 
-  <div class="row align-items-center g-2 mb-2">
-    <div class="col-sm-5">{{ item.label }}</div>
-    <div class="col-sm-3">
-      <div class="d-flex gap-3">
-        <div class="form-check">
-          <input class="form-check-input" type="radio" name="item_status_{{ loop.index0 }}" id="p{{ loop.index0 }}" value="pass">
-          <label class="form-check-label" for="p{{ loop.index0 }}">Pass</label>
-        </div>
-        <div class="form-check">
-          <input class="form-check-input" type="radio" name="item_status_{{ loop.index0 }}" id="f{{ loop.index0 }}" value="fail">
-          <label class="form-check-label" for="f{{ loop.index0 }}">Fail</label>
-        </div>
-      </div>
-    </div>
-    <div class="col-sm-4">
-      <input class="form-control" name="item_comment_{{ loop.index0 }}" placeholder="Comments (optional)">
-    </div>
-  </div>
-{% endfor %}
-    <div class="mt-3">
-      <label class="form-label">Photos (defects, mileage, etc.)</label>
-      <div class="photo-input">
-        <input class="form-control" type="file" name="photos" accept="image/*" capture="environment" multiple>
-        <small class="text-secondary">You can add multiple images.</small>
-      </div>
-    </div>
-    <div class="mt-3">
-      <label class="form-label">Driver Signature</label>
-      <div><canvas id="sig" class="w-100 sig-pad"></canvas></div>
-      <div class="mt-2 d-flex gap-2">
-        <button type="button" class="btn btn-outline-light btn-sm" onclick="sigClear()">Clear</button>
-        <button type="button" class="btn btn-outline-info btn-sm" onclick="sigUndo()">Undo</button>
-      </div>
-      {{ form.signature_data(id='signature_data') }}
-    </div>
-    <div class="mt-3">
-      <label class="form-label">Additional Notes</label>
-      {{ form.notes(class_='form-control', rows=3, placeholder='Anything else to record') }}
-    </div>
-    <div class="mt-4 d-grid">
-      <button class="btn btn-primary btn-lg">Submit Check</button>
-    </div>
-  </form>
-  <script>
-    const select = document.querySelector('select[name="vehicle_select"]');
-    const mmInput = document.getElementById('mm');
-    function updateMM(){ const opt = select.selectedOptions[0]; mmInput.value = (opt && opt.dataset.mm) ? opt.dataset.mm : ''; }
-    select.addEventListener('change', updateMM); updateMM();
-    const canvas = document.getElementById('sig');
-    const sigInput = document.getElementById('signature_data');
-    const ctx = canvas.getContext('2d');
-    let drawing = false; let points=[];
-    function resize(){ canvas.width = canvas.clientWidth; canvas.height = 200; redraw(); }
-    window.addEventListener('resize', resize); resize();
-    function pos(e){ const r=canvas.getBoundingClientRect(); const t=e.touches?e.touches[0]:e; return {x:(t.clientX-r.left), y:(t.clientY-r.top)} }
-    function start(e){ drawing=true; points.push([]); add(e); }
-    function add(e){ if(!drawing) return; const p=pos(e); points[points.length-1].push(p); redraw(); }
-    function end(){ drawing=false; save(); }
-    function redraw(){ ctx.clearRect(0,0,canvas.width,canvas.height); ctx.lineWidth=2; ctx.lineCap='round'; ctx.strokeStyle='#fff';
-      for(const stroke of points){ if(stroke.length<2) continue; ctx.beginPath(); ctx.moveTo(stroke[0].x, stroke[0].y); for(const p of stroke){ ctx.lineTo(p.x,p.y);} ctx.stroke(); }
-      ctx.setLineDash([5,5]); ctx.strokeStyle='#777'; ctx.strokeRect(2,2,canvas.width-4,canvas.height-4); ctx.setLineDash([]);
-    }
-    function save(){ sigInput.value = canvas.toDataURL('image/png'); }
-    function sigClear(){ points=[]; redraw(); save(); }
-    function sigUndo(){ points.pop(); redraw(); save(); }
-    canvas.addEventListener('mousedown', start); canvas.addEventListener('mousemove', add); window.addEventListener('mouseup', end);
-    canvas.addEventListener('touchstart', (e)=>{e.preventDefault(); start(e);}); canvas.addEventListener('touchmove', (e)=>{e.preventDefault(); add(e);}); canvas.addEventListener('touchend', (e)=>{e.preventDefault(); end(e);});
-  // Ensure signature is saved at submit time
-  document.querySelector('form').addEventListener('submit', function() {
-    save(); // write canvas -> hidden field
-  });
-</script>
-{% endblock %}
-"""
+    # signature (dataURL)
+    sig_data = request.form.get('signature_data') or ''
+    if sig_data.startswith('data:image/png;base64,'):
+        img_b64 = sig_data.split(',', 1)[1]
+        sig_name = f"sig_{dt.datetime.utcnow():%Y%m%d%H%M%S}_{secrets.token_hex(4)}.png"
+        sig_path = os.path.join(app.config['UPLOAD_FOLDER'], sig_name)
+        with open(sig_path, 'wb') as f:
+            f.write(base64.b64decode(img_b64))
+        c.signature_path = sig_name
 
-TPL_SUCCESS = r"""
-{% extends 'TPL_BASE' %}
-{% block content %}
-  <div class="text-center py-5">
-    <h3 class="mb-3">✅ Check Submitted</h3>
-    <p>Reference: <strong>#{{ check.id }}</strong> — {{ check.vehicle.reg }} — {{ check.created_at.strftime('%Y-%m-%d %H:%M') }} UTC</p>
-    <a href="{{ url_for('new_check') }}" class="btn btn-outline-light mt-3">Submit another</a>
-  </div>
-{% endblock %}
-"""
+    db.session.add(c)
+    db.session.flush()  # ensure c.id
 
-TPL_ADMIN = r"""
-{% extends 'TPL_BASE' %}
-{% block content %}
-  <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
-    <h3 class="me-auto">Admin — Recent Checks</h3>
-    <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('admin_vehicles') }}">Manage Vehicles</a>
-    <a class="btn btn-outline-info btn-sm" href="{{ url_for('export_csv') }}">Export CSV</a>
-  </div>
-  <div class="table-responsive">
-    <table class="table table-dark table-striped align-middle">
-      <thead><tr><th>ID</th><th>Time (UTC)</th><th>Driver</th><th>Reg</th><th>Odo</th><th>Safe?</th><th>Defects</th><th></th></tr></thead>
-      <tbody>
-        {% for c in rows %}
-          <tr>
-            <td>#{{ c.id }}</td>
-            <td>{{ c.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
-            <td>{{ c.driver_name }}</td>
-            <td>{{ c.vehicle.reg }}</td>
-            <td>{{ c.odometer or '' }}</td>
-            <td>{% if c.safe_to_drive %}<span class="badge bg-success">Yes</span>{% else %}<span class="badge bg-danger">No</span>{% endif %}</td>
-            <td class="text-truncate" style="max-width:300px;">{{ (c.defects or '-') }}</td>
-            <td><a class="btn btn-sm btn-outline-light" href="{{ url_for('admin_check', check_id=c.id) }}">Open</a></td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-{% endblock %}
-"""
+    # photos
+    files = request.files.getlist('photos')
+    for f in files:
+        try:
+            if not f or not getattr(f, 'filename', ''):
+                continue
+            filename = f.filename
+            if not allowed_file(filename):
+                continue
+            safe = secure_filename(f"{c.id}_{int(dt.datetime.utcnow().timestamp())}_{filename}")
+            fpath = os.path.join(app.config['UPLOAD_FOLDER'], safe)
+            try:
+                img = Image.open(f.stream)
+                if img.mode not in ('RGB', 'RGBA'):
+                    img = img.convert('RGB')
+                img.thumbnail((2000, 2000))
+                img.save(fpath, optimize=True, quality=85)
+            except Exception:
+                f.stream.seek(0)
+                with open(fpath, 'wb') as out:
+                    out.write(f.read())
+            db.session.add(Photo(check_id=c.id, path=safe))
+        except Exception:
+            app.logger.exception('Failed to process uploaded photo')
 
-TPL_DETAIL = r"""
-{% extends 'TPL_BASE' %}
-{% block content %}
-  <h3>Check #{{ c.id }} — {{ c.vehicle.reg }}</h3>
-  <p><strong>Driver:</strong> {{ c.driver_name }} | <strong>Time (UTC):</strong> {{ c.created_at.strftime('%Y-%m-%d %H:%M') }} | <strong>Odo:</strong> {{ c.odometer or '-' }}</p>
-  <div class="row g-3">
-    <div class="col-md-7">
-      <div class="card card-body">
-        <h5>Checklist</h5>
-        {% if items %}
-        <div class="table-responsive">
-          <table class="table table-dark table-sm align-middle">
-            <thead><tr><th>Section</th><th>Item</th><th>Status</th><th>Comment</th></tr></thead>
-            <tbody>
-              {% for it in items %}
-                <tr>
-                  <td class="text-secondary">{{ it.section }}</td>
-                  <td>{{ it.label }}</td>
-                  <td>{% if it.status=='pass' %}<span class="badge bg-success">Pass</span>{% elif it.status=='fail' %}<span class="badge bg-danger">Fail</span>{% else %}-{% endif %}</td>
-                  <td>{{ it.comment }}</td>
-                </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-        {% else %}
-          <p class="text-secondary">No checklist captured.</p>
-        {% endif %}
-      </div>
-      <div class="card card-body mt-3">
-        <h5>Defects</h5>
-        <p class="mb-0">{{ c.defects or '-' }}</p>
-      </div>
-      <div class="card card-body mt-3">
-        <h5>Notes</h5>
-        <p class="mb-0">{{ c.notes or '-' }}</p>
-      </div>
-    </div>
-    <div class="col-md-5">
-      <div class="card card-body">
-        <h5>Photos</h5>
-        {% if c.photos %}
-          <div class="row row-cols-2 g-2">
-            {% for p in c.photos %}
-              <div class="col">
-                <img class="img-fluid rounded"
-                     src="{{ url_for('uploaded_file', filename=p.path.split('/')[-1]) }}"
-                     alt="photo">
-              </div>
-            {% endfor %}
-          </div>
-        {% else %}
-          <p class="text-secondary">No photos</p>
-        {% endif %}
-      </div>
-      <div class="card card-body mt-3">
-        <h5>Driver Signature</h5>
-        {% if c.signature_path %}
-          <img class="img-fluid bg-white rounded"
-               src="{{ url_for('uploaded_file', filename=c.signature_path.split('/')[-1]) }}"
-               alt="signature">
-        {% else %}
-          <p class="text-secondary">None</p>
-        {% endif %}
-      </div>
-      <div class="mt-3">
-        <a class="btn btn-outline-info" href="{{ url_for('export_csv') }}">Export CSV</a>
-      </div>
-    </div>
-  </div>
-{% endblock %}
-"""
+    db.session.commit()
 
-TPL_VEHICLES = r"""
-{% extends 'TPL_BASE' %}
-{% block content %}
-  <div class="d-flex align-items-center mb-2 gap-2">
-    <h3 class="me-auto">Manage Vehicles</h3>
-    <a class="btn btn-outline-light btn-sm" href="{{ url_for('admin_dashboard') }}">Back</a>
-  </div>
-  <form method="post" class="card p-3 bg-secondary-subtle mb-3">
-    <div class="row g-2">
-      <div class="col-md-3"><input class="form-control text-uppercase" name="reg" placeholder="Registration (e.g. AB12CDE)" required></div>
-      <div class="col-md-6"><input class="form-control" name="make_model" placeholder="Make / Model (optional)"></div>
-      <div class="col-md-3 d-grid"><button class="btn btn-primary">Add Vehicle</button></div>
-    </div>
-  </form>
-  <div class="table-responsive">
-    <table class="table table-dark table-striped align-middle">
-      <thead><tr><th>Reg</th><th>Make/Model</th><th>Status</th><th>Actions</th></tr></thead>
-      <tbody>
-        {% for v in vehicles %}
-        <tr>
-          <td>{{ v.reg }}</td>
-          <td>{{ v.make_model }}</td>
-          <td>{% if v.active %}<span class='badge bg-success'>Active{% else %}<span class='badge bg-secondary'>Inactive{% endif %}</span></td>
-          <td class="d-flex gap-2">
-            <a class="btn btn-sm btn-outline-light" href="{{ url_for('edit_vehicle', vid=v.id) }}">Edit</a>
-            <a class="btn btn-sm btn-outline-info" href="{{ url_for('toggle_vehicle', vid=v.id) }}">Toggle</a>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-{% endblock %}
-"""
+    # fire-and-forget email
+    try:
+        threading.Thread(target=send_submission_email, args=(c, items), daemon=True).start()
+    except Exception:
+        app.logger.exception('Failed to start email thread')
 
-TPL_VEHICLE_EDIT = r"""
-{% extends 'TPL_BASE' %}
-{% block content %}
-  <div class="d-flex align-items-center mb-2 gap-2">
-    <h3 class="me-auto">Edit Vehicle</h3>
-    <a class="btn btn-outline-light btn-sm" href="{{ url_for('admin_vehicles') }}">Back</a>
-  </div>
-  <form method="post" class="card p-3 bg-secondary-subtle" style="max-width:560px;">
-    <div class="mb-3">
-      <label class="form-label">Registration</label>
-      <input class="form-control text-uppercase" name="reg" value="{{ v.reg }}" required>
-    </div>
-    <div class="mb-3">
-      <label class="form-label">Make / Model</label>
-      <input class="form-control" name="make_model" value="{{ v.make_model or '' }}">
-    </div>
-    <div class="d-flex gap-2">
-      <button class="btn btn-primary">Save</button>
-      <a class="btn btn-outline-secondary" href="{{ url_for('toggle_vehicle', vid=v.id) }}">
-        {% if v.active %}Set Inactive{% else %}Set Active{% endif %}
-      </a>
-    </div>
-  </form>
-{% endblock %}
-"""
+    return redirect(url_for('success', check_id=c.id))
 
-app.jinja_loader = DictLoader({'TPL_BASE': TPL_BASE})
+@app.route('/success/<int:check_id>')
+def success(check_id):
+    return render_template_string(TPL_SUCCESS, check_id=check_id)
 
+# --------------------------- Admin ---------------------------------
+@app.route('/admin/login', methods=['GET', 'POST'])
+def admin_login():
+    if request.method == 'POST':
+        if request.form.get('password') == str(ADMIN_PASSWORD):
+            session['admin'] = True
+            return redirect(url_for('admin'))
+        flash('Wrong password')
+    return render_template_string(TPL_ADMIN_LOGIN)
+
+@app.route('/admin/logout')
+def admin_logout():
+    session.pop('admin', None)
+    return redirect(url_for('admin_login'))
+
+@app.route('/admin')
+@admin_required
+def admin():
+    checks = Check.query.order_by(Check.created_at.desc()).limit(200).all()
+    vehicles = Vehicle.query.order_by(Vehicle.reg).all()
+    return render_template_string(TPL_ADMIN, checks=checks, vehicles=vehicles)
+
+@app.route('/admin/check/<int:check_id>')
+@admin_required
+def admin_check(check_id):
+    c = Check.query.get_or_404(check_id)
+    items = json.loads(c.items_json or '[]')
+    return render_template_string(TPL_ADMIN_CHECK, c=c, items=items)
+
+@app.route('/admin/vehicles', methods=['POST'])
+@admin_required
+def admin_vehicles():
+    action = request.form.get('action')
+    if action == 'add':
+        reg = (request.form.get('reg') or '').strip().upper()
+        mm  = (request.form.get('make_model') or '').strip()
+        if reg and not Vehicle.query.filter_by(reg=reg).first():
+            db.session.add(Vehicle(reg=reg, make_model=mm))
+            db.session.commit()
+    elif action == 'delete':
+        vid = request.form.get('id')
+        v = Vehicle.query.get(int(vid)) if vid else None
+        if v:
+            db.session.delete(v); db.session.commit()
+    elif action == 'update':
+        vid = request.form.get('id')
+        mm  = (request.form.get('make_model') or '').strip()
+        v = Vehicle.query.get(int(vid)) if vid else None
+        if v:
+            v.make_model = mm; db.session.commit()
+    return redirect(url_for('admin'))
+
+@app.route('/admin/export.csv')
+@admin_required
+def export_csv():
+    # quick CSV export of recent checks
+    output = io.StringIO()
+    w = csv.writer(output)
+    w.writerow(['id','created_at','vehicle_reg','make_model','driver_name','mileage','notes','items_json'])
+    for c in Check.query.order_by(Check.created_at.desc()).all():
+        w.writerow([
+            c.id, c.created_at.isoformat(timespec='seconds'),
+            c.vehicle.reg if c.vehicle else '',
+            c.vehicle.make_model if c.vehicle else '',
+            c.driver_name or '', c.mileage or '', (c.notes or '').replace('\n',' '),
+            c.items_json or '[]'
+        ])
+    resp = make_response(output.getvalue())
+    resp.headers['Content-Type'] = 'text/csv'
+    resp.headers['Content-Disposition'] = 'attachment; filename="checks.csv"'
+    return resp
+
+# --------------------------- Cron (monthly) -------------------------
+def _ensure_cron_token():
+    token = request.args.get('token', '')
+    if not CRON_SECRET or token != CRON_SECRET:
+        abort(403)
+
+def _vehicles_missing_for_month(year: int, month: int):
+    # vehicles without a check in given year/month
+    start = dt.datetime(year, month, 1)
+    end = (start + dt.timedelta(days=32)).replace(day=1)
+    have = {c.vehicle_id for c in Check.query.filter(Check.created_at >= start, Check.created_at < end).all()}
+    all_vs = Vehicle.query.all()
+    return [v for v in all_vs if v.id not in have]
+
+@app.route('/cron/monthly/due')
+def cron_due():
+    _ensure_cron_token()
+    now = dt.datetime.utcnow()
+    miss = _vehicles_missing_for_month(now.year, now.month)
+    body = "Vehicles due for monthly checks (1st notice):\n" + "\n".join(f"{v.reg} {v.make_model or ''}" for v in miss) if miss else "All vehicles checked."
+    send_simple_email("Monthly vehicle check – Due", body)
+    return {"ok": True, "missing": [v.reg for v in miss]}
+
+@app.route('/cron/monthly/amber')
+def cron_amber():
+    _ensure_cron_token()
+    now = dt.datetime.utcnow()
+    miss = _vehicles_missing_for_month(now.year, now.month)
+    body = "Vehicles overdue (amber):\n" + "\n".join(f"{v.reg} {v.make_model or ''}" for v in miss) if miss else "All vehicles checked."
+    send_simple_email("Monthly vehicle check – Overdue (Amber)", body)
+    return {"ok": True, "missing": [v.reg for v in miss]}
+
+@app.route('/cron/monthly/red')
+def cron_red():
+    _ensure_cron_token()
+    now = dt.datetime.utcnow()
+    miss = _vehicles_missing_for_month(now.year, now.month)
+    body = "Vehicles overdue (RED):\n" + "\n".join(f"{v.reg} {v.make_model or ''}" for v in miss) if miss else "All vehicles checked."
+    send_simple_email("Monthly vehicle check – OVERDUE (RED)", body)
+    return {"ok": True, "missing": [v.reg for v in miss]}
+
+# --------------------------- Static / PWA ---------------------------
 @app.route('/uploads/<path:filename>')
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
+@app.route('/manifest.webmanifest')
+def manifest():
+    return make_response(TPL_MANIFEST, 200, {'Content-Type': 'application/manifest+json'})
+
+@app.route('/sw.js')
+def sw():
+    resp = make_response(TPL_SW, 200)
+    resp.headers['Content-Type'] = 'application/javascript'
+    return resp
+
+# --------------------------- CLI init -------------------------------
 @app.cli.command('init-db')
 def init_db():
     db.create_all()
@@ -964,8 +515,351 @@ def init_db():
         db.session.commit()
     print('DB initialised ✅')
 
+# --------------------------- Templates ------------------------------
+TPL_BASE = r"""
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="manifest" href="{{ url_for('manifest') }}">
+  <link rel="icon" href="{{ url_for('static', filename='logo.png') }}">
+  <title>{{ title or 'Vehicle Check' }}</title>
+  <style>
+    body{font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji', 'Segoe UI Emoji'; margin:0; background:#111; color:#e9e9e9}
+    .wrap{max-width:1100px;margin:0 auto;padding:16px}
+    .card{background:#1a1a1a;border:1px solid #2b2b2b;border-radius:12px;margin:12px 0;padding:16px}
+    input,select,textarea{width:100%;padding:10px;border-radius:8px;border:1px solid #2d2d2d;background:#0f0f0f;color:#e9e9e9}
+    label{display:block;margin:6px 0 4px;color:#bbb}
+    .row{display:flex;gap:12px;flex-wrap:wrap}
+    .col{flex:1 1 260px}
+    .btn{background:#0ea5e9;color:white;border:0;border-radius:10px;padding:10px 14px;cursor:pointer}
+    .btn.alt{background:#2e2e2e}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;border:1px solid #3b3b3b;font-size:12px}
+    .grid{display:grid;grid-template-columns:1fr 120px 1fr;gap:8px;align-items:center}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px;border-bottom:1px solid #2a2a2a}
+    h1,h2,h3,h4,h5{margin:0 0 8px}
+    small{color:#9a9a9a}
+    canvas.sig{border:1px dashed #666; width:100%; height:180px; background:#fff}
+    .section{margin-top:16px;border-top:1px solid #2a2a2a;padding-top:12px}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  {% with msgs = get_flashed_messages() %}
+  {% if msgs %}<div class="card" style="border-color:#ef4444;background:#1e1b1b">
+    {% for m in msgs %}<div>{{ m }}</div>{% endfor %}
+  </div>{% endif %}{% endwith %}
+  {{ content|safe }}
+</div>
+<script>
+  if ('serviceWorker' in navigator) { navigator.serviceWorker.register('/sw.js'); }
+</script>
+</body></html>
+"""
+
+TPL_PIN = """
+{% set title='Driver PIN' %}
+{% set content %}
+<div class="card">
+  <h3>Driver sign-in</h3>
+  <form method="post">
+    <label>Enter PIN</label>
+    <input name="pin" type="password" inputmode="numeric" autocomplete="one-time-code" required>
+    <div style="margin-top:10px"><button class="btn">Continue</button></div>
+    <div class="section"><small>Tip: save this page to your home screen to use it like an app.</small></div>
+  </form>
+</div>
+{% endset %}
+""" + TPL_BASE
+
+TPL_FORM = """
+{% set title='Vehicle Check' %}
+{% set content %}
+<div class="card">
+  <h3>Vehicle & Driver</h3>
+  <form method="post" enctype="multipart/form-data">
+    <div class="row">
+      <div class="col">
+        <label>Vehicle (reg)</label>
+        <select name="vehicle_reg" id="vehicle_reg" required>
+          <option value="" disabled selected>Select vehicle</option>
+          {% for v in vehicles %}
+          <option value="{{ v.reg }}" data-mm="{{ v.make_model or '' }}">{{ v.reg }}</option>
+          {% endfor %}
+        </select>
+        <small>Make & model autofill below.</small>
+      </div>
+      <div class="col">
+        <label>Make & model</label>
+        <input id="mm" type="text" readonly>
+      </div>
+      <div class="col">
+        <label>Driver name</label>
+        <input name="driver_name" placeholder="Optional">
+      </div>
+      <div class="col">
+        <label>Mileage</label>
+        <input name="mileage" inputmode="numeric" placeholder="e.g. 73421">
+      </div>
+    </div>
+
+    <div class="section">
+      <h4>Checklist</h4>
+      <div class="grid" style="font-weight:600;color:#bbb"><div>Item</div><div>Status</div><div>Comment</div></div>
+      {% for item in CHECK_ITEMS %}
+        {% if loop.first or (item.section != CHECK_ITEMS[loop.index0-1].section) %}
+        <div style="margin-top:12px;color:#9aa" class="section"><strong>{{ item.section }}</strong></div>
+        {% endif %}
+        <div class="grid">
+          <div>{{ item.label }}</div>
+          <div>
+            <label class="pill"><input type="radio" name="item_status_{{ loop.index0 }}" value="pass"> Pass</label>
+            <label class="pill"><input type="radio" name="item_status_{{ loop.index0 }}" value="fail"> Fail</label>
+          </div>
+          <div><input name="item_comment_{{ loop.index0 }}" placeholder="(optional)"></div>
+        </div>
+      {% endfor %}
+    </div>
+
+    <div class="section">
+      <h4>Photos</h4>
+      <input type="file" name="photos" accept="image/*" multiple capture="environment">
+      <small>You can add multiple images.</small>
+    </div>
+
+    <div class="section">
+      <h4>Driver Signature</h4>
+      <canvas id="sig" class="sig"></canvas>
+      <input type="hidden" name="signature_data" id="signature_data">
+      <div style="margin-top:8px">
+        <button type="button" class="btn alt" onclick="sigClear()">Clear</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <label>Additional notes</label>
+      <textarea name="notes" rows="3" placeholder="Anything else to record?"></textarea>
+    </div>
+
+    <div style="margin-top:12px">
+      <button class="btn">Submit Check</button>
+      <a href="{{ url_for('logout') }}" class="btn alt">Sign out</a>
+    </div>
+  </form>
+</div>
+
+<script>
+  // Make/Model autofill
+  const sel = document.getElementById('vehicle_reg');
+  const mm  = document.getElementById('mm');
+  sel?.addEventListener('change', e => {
+    const opt = sel.selectedOptions[0];
+    mm.value = opt ? (opt.getAttribute('data-mm') || '') : '';
+  });
+
+  // very small signature pad
+  const canvas = document.getElementById('sig');
+  const ctx = canvas.getContext('2d');
+  function resize(){ const r = canvas.getBoundingClientRect();
+    const tmp = ctx.getImageData(0,0,canvas.width,canvas.height);
+    canvas.width = r.width; canvas.height = r.height; ctx.putImageData(tmp,0,0);
+  }
+  window.addEventListener('resize', resize); resize();
+  ctx.lineWidth = 2; ctx.lineJoin='round'; ctx.strokeStyle='#111';
+  let drawing=false; let last={x:0,y:0};
+  function pos(ev){ const rect = canvas.getBoundingClientRect();
+    const e = ev.touches? ev.touches[0] : ev; return {x:e.clientX-rect.left, y:e.clientY-rect.top}; }
+  canvas.addEventListener('mousedown',e=>{drawing=true; last=pos(e);});
+  canvas.addEventListener('touchstart',e=>{drawing=true; last=pos(e);});
+  function draw(e){ if(!drawing) return; const p=pos(e); ctx.beginPath(); ctx.moveTo(last.x,last.y); ctx.lineTo(p.x,p.y); ctx.stroke(); last=p; e.preventDefault();}
+  canvas.addEventListener('mousemove',draw); canvas.addEventListener('touchmove',draw,{passive:false});
+  window.addEventListener('mouseup',()=>drawing=false); window.addEventListener('touchend',()=>drawing=false);
+  function sigClear(){ ctx.clearRect(0,0,canvas.width,canvas.height); }
+  window.sigClear = sigClear;
+
+  // on submit pack signature
+  document.querySelector('form').addEventListener('submit', ()=>{
+    document.getElementById('signature_data').value = canvas.toDataURL('image/png');
+  });
+</script>
+{% endset %}
+""" + TPL_BASE
+
+TPL_SUCCESS = """
+{% set title='Submitted' %}
+{% set content %}
+<div class="card">
+  <h3>Thanks!</h3>
+  <p>Your check (#{{ check_id }}) has been submitted successfully.</p>
+  <p><a class="btn" href="{{ url_for('check') }}">Do another</a></p>
+</div>
+{% endset %}
+""" + TPL_BASE
+
+TPL_ADMIN_LOGIN = """
+{% set title='Admin Login' %}
+{% set content %}
+<div class="card">
+  <h3>Admin login</h3>
+  <form method="post">
+    <label>Password</label>
+    <input name="password" type="password" required>
+    <div style="margin-top:10px"><button class="btn">Sign in</button></div>
+  </form>
+</div>
+{% endset %}
+""" + TPL_BASE
+
+TPL_ADMIN = """
+{% set title='Admin' %}
+{% set content %}
+<div class="row">
+  <div class="col">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h3>Recent checks</h3>
+        <div>
+          <a class="btn alt" href="{{ url_for('export_csv') }}">Export CSV</a>
+          <a class="btn alt" href="{{ url_for('admin_logout') }}">Logout</a>
+        </div>
+      </div>
+      <table>
+        <tr><th>ID</th><th>When</th><th>Vehicle</th><th>Driver</th><th></th></tr>
+        {% for c in checks %}
+        <tr>
+          <td>#{{ c.id }}</td>
+          <td>{{ c.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+          <td>{{ c.vehicle.reg if c.vehicle else '?' }} <small>{{ c.vehicle.make_model if c.vehicle else '' }}</small></td>
+          <td>{{ c.driver_name or '-' }}</td>
+          <td><a class="btn" href="{{ url_for('admin_check', check_id=c.id) }}">View</a></td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+  </div>
+  <div class="col">
+    <div class="card">
+      <h3>Vehicles</h3>
+      <form method="post" action="{{ url_for('admin_vehicles') }}">
+        <input type="hidden" name="action" value="add">
+        <div class="row">
+          <div class="col"><label>Reg</label><input name="reg" required placeholder="AB12CDE"></div>
+          <div class="col"><label>Make & model</label><input name="make_model" placeholder="Ford Transit"></div>
+        </div>
+        <div style="margin-top:8px"><button class="btn">Add vehicle</button></div>
+      </form>
+      <div class="section">
+        <table>
+          <tr><th>Reg</th><th>Make & model</th><th>Actions</th></tr>
+          {% for v in vehicles %}
+          <tr>
+            <td>{{ v.reg }}</td>
+            <td>
+              <form method="post" action="{{ url_for('admin_vehicles') }}" style="display:flex;gap:6px;align-items:center">
+                <input type="hidden" name="id" value="{{ v.id }}">
+                <input type="hidden" name="action" value="update">
+                <input name="make_model" value="{{ v.make_model or '' }}">
+                <button class="btn alt">Save</button>
+              </form>
+            </td>
+            <td>
+              <form method="post" action="{{ url_for('admin_vehicles') }}" onsubmit="return confirm('Delete vehicle?');">
+                <input type="hidden" name="action" value="delete">
+                <input type="hidden" name="id" value="{{ v.id }}">
+                <button class="btn" style="background:#ef4444">Delete</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endset %}
+""" + TPL_BASE
+
+TPL_ADMIN_CHECK = """
+{% set title='Check #' ~ c.id %}
+{% set content %}
+<div class="card">
+  <h3>Check #{{ c.id }}</h3>
+  <p><strong>{{ c.vehicle.reg }}</strong> <small>{{ c.vehicle.make_model or '' }}</small></p>
+  <p><small>{{ c.created_at.strftime('%Y-%m-%d %H:%M') }}</small></p>
+  <p>Driver: {{ c.driver_name or '-' }} &nbsp; | &nbsp; Mileage: {{ c.mileage or '-' }}</p>
+  {% if c.notes %}<p><em>Notes:</em> {{ c.notes }}</p>{% endif %}
+  <div class="section">
+    <h4>Items</h4>
+    <table>
+      <tr><th>Section</th><th>Item</th><th>Status</th><th>Comment</th></tr>
+      {% for it in items %}
+      <tr>
+        <td>{{ it.section }}</td>
+        <td>{{ it.label }}</td>
+        <td>{{ (it.status or '').upper() }}</td>
+        <td>{{ it.comment or '' }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  <div class="section">
+    <h4>Photos</h4>
+    {% if c.photos %}
+      <div class="row">
+      {% for p in c.photos %}
+        <div class="col">
+          <img src="{{ url_for('uploaded_file', filename=p.path) }}" style="max-width:100%;border:1px solid #333;border-radius:8px">
+        </div>
+      {% endfor %}
+      </div>
+    {% else %}
+      <p><small>No photos</small></p>
+    {% endif %}
+  </div>
+  <div class="section">
+    <h4>Driver Signature</h4>
+    {% if c.signature_path %}
+      <img src="{{ url_for('uploaded_file', filename=c.signature_path) }}" style="max-width:320px;border:1px dashed #555;background:#fff">
+    {% else %}
+      <p><small>No signature</small></p>
+    {% endif %}
+  </div>
+  <p><a class="btn alt" href="{{ url_for('admin') }}">Back</a></p>
+</div>
+{% endset %}
+""" + TPL_BASE
+
+# PWA resources
+TPL_MANIFEST = """{
+  "name": "Driver Vehicle Check",
+  "short_name": "VehicleCheck",
+  "start_url": "/pin",
+  "display": "standalone",
+  "background_color": "#111111",
+  "theme_color": "#111111",
+  "icons": [
+    {"src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png"}
+  ]
+}"""
+
+TPL_SW = """
+self.addEventListener('install', e => { self.skipWaiting(); });
+self.addEventListener('activate', e => { self.clients.claim(); });
+self.addEventListener('fetch', e => {
+  const url = new URL(e.request.url);
+  if (url.pathname.startsWith('/static/') || url.pathname.startsWith('/uploads/') || url.pathname == '/manifest.webmanifest') {
+    e.respondWith(fetch(e.request));
+  }
+});
+"""
+
+# --------------------------- Main -----------------------------------
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
     port = int(os.getenv('PORT', '5001'))
     app.run(host='0.0.0.0', port=port, debug=True)
+

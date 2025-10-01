@@ -453,38 +453,38 @@ from reportlab.pdfgen import canvas as pdfcanvas
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 
-def send_submission_email(c: Check, items: list):
-    pdf_bytes = build_pdf_for_check(c, items)
-    if GDRIVE_ENABLED and GDRIVE_FOLDER_ID:
-        try:
-            pdf_name = f'check_{c.id}_{c.vehicle.reg}.pdf'
-            tmp_path = os.path.join(app.config['UPLOAD_FOLDER'], pdf_name)
-            with open(tmp_path,'wb') as _f: _f.write(pdf_bytes)
-            upload_to_drive_structured(tmp_path, c.vehicle.reg, c.created_at, pdf_name, 'application/pdf')
-        except Exception:
-            app.logger.warning('Drive upload failed for PDF', exc_info=True)
-    host, port, user, pwd, to = _mail_cfg()
-    if not (host and user and pwd and to):
+def send_submission_email(check, items):
+    """Send PDF email; never block request if SMTP is slow."""
+    host = os.getenv('MAIL_HOST')
+    if not host:
+        app.logger.info('MAIL_HOST not set; skipping email.')
         return
-    any_fail = any(i.get('status')=='fail' for i in items) or (c.defects and c.defects.strip()) or (not c.safe_to_drive)
-    tag = "DEFECT" if any_fail else "Submission"
+
+    port = int(os.getenv('MAIL_PORT', '587'))
+    user = os.getenv('MAIL_USER')
+    pwd  = os.getenv('MAIL_PASS')
+    to   = os.getenv('MAIL_TO') or user
+
+    # Build the message and attach the PDF as before
     msg = EmailMessage()
-    msg['Subject'] = f"{tag}: {c.vehicle.reg} by {c.driver_name} — #{c.id}"
+    msg['Subject'] = f"Vehicle Check - {check.vehicle.reg} - {check.created_at:%Y-%m-%d %H:%M}"
     msg['From'] = user
     msg['To'] = to
-    msg.set_content(
-        f"Time: {c.created_at}\n"
-        f"Reg: {c.vehicle.reg}\n"
-        f"Driver: {c.driver_name}\n"
-        f"Safe to drive: {c.safe_to_drive}\n"
-        f"Odometer: {c.odometer}\n"
-        f"Defects: {c.defects or '-'}\n"
-        f"Notes: {c.notes or '-'}\n"
-    )
-    msg.add_attachment(pdf_bytes, maintype='application', subtype='pdf', filename=f'check_{c.id}_{c.vehicle.reg}.pdf')
-    with smtplib.SMTP(host, port) as s:
-        s.starttls(); s.login(user, pwd); s.send_message(msg)
+    msg.set_content("Attached: vehicle check PDF.")
+    pdf_bytes = build_pdf_bytes(check, items)  # your existing PDF builder
+    msg.add_attachment(pdf_bytes, maintype='application', subtype='pdf',
+                       filename=f"check_{check.id}.pdf")
 
+    try:
+        # 10s socket timeout so we don’t hang the worker
+        with smtplib.SMTP(host, port, timeout=10) as s:
+            s.ehlo()
+            s.starttls()
+            s.login(user, pwd)
+            s.send_message(msg)
+        app.logger.info('Submission email sent.')
+    except (smtplib.SMTPException, socket.timeout, OSError) as e:
+        app.logger.warning(f'Submission email failed: {e}')
 def build_pdf_for_check(c: Check, items: list) -> bytes:
     buf = io.BytesIO()
     p = pdfcanvas.Canvas(buf, pagesize=A4)

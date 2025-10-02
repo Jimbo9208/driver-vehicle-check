@@ -5,3 +5,7 @@ instance/
 *.db
 *.sqlite3
 .env
+.DS_Store
+static/.DS_Store
+__pycache__/
+.env

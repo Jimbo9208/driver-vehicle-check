@@ -39,8 +39,8 @@ SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 RUNNING_ON_RENDER = os.getenv("RENDER", "") != ""
 CLEANUP_LEGACY = os.getenv("CLEANUP_LEGACY", "0") == "1"
-LOGO_URL = os.getenv("LOGO_URL", "https://drive.google.com/uc?export=view&id=1djWHjQFdDGO7qvrd4iMYTN8wpCiV_FD0
-") 
+LOGO_URL = os.getenv("LOGO_URL", "https://drive.google.com/uc?export=view&id=1djWHjQFdDGO7qvrd4iMYTN8wpCiV_FD0")
+ 
 # Google Drive
 GDRIVE_ROOT = os.getenv("GDRIVE_ROOT", "Vehicle Checks")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")  # JSON blob in env (optional)

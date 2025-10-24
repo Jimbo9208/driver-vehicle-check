@@ -39,7 +39,8 @@ SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 RUNNING_ON_RENDER = os.getenv("RENDER", "") != ""
 CLEANUP_LEGACY = os.getenv("CLEANUP_LEGACY", "0") == "1"
-
+LOGO_URL = os.getenv("LOGO_URL", "https://drive.google.com/uc?export=view&id=1djWHjQFdDGO7qvrd4iMYTN8wpCiV_FD0
+") 
 # Google Drive
 GDRIVE_ROOT = os.getenv("GDRIVE_ROOT", "Vehicle Checks")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")  # JSON blob in env (optional)
@@ -257,30 +258,148 @@ BASE_HTML = """
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8"/>
-    <meta name="viewport" content="width=device-width,initial-scale=1"/>
-    <title>{{ title or app_name }}</title>
     <style>
-      :root { color-scheme: light dark; }
-      body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
-             margin:0; padding:0; background:#0b0d10; color:#e8eaed; }
-      .wrap { max-width: 1000px; margin: 0 auto; padding: 24px; }
-      .card { background:#111418; border:1px solid #22252a; border-radius:16px; padding:20px; }
-      label { display:block; margin-bottom:6px; font-weight:600; }
-      input, select, textarea { width:100%; padding:10px 12px; border-radius:10px;
-        border:1px solid #30343a; background:#0c0f13; color:#e8eaed; }
-      input[type=file]{ padding:8px; }
-      textarea { min-height: 110px; }
-      .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
-      .checks { display:grid; grid-template-columns:repeat(auto-fill, minmax(200px,1fr)); gap:12px; }
-      .check-item { border:1px solid #22252a; border-radius:12px; padding:10px; background:#0c0f13; }
-      .btn { display:inline-block; padding:10px 16px; border-radius:10px; border:1px solid #3a6df0;
-             background:#2a5ae8; color:white; text-decoration:none; font-weight:600; cursor:pointer; }
-      .btn.secondary { background:transparent; border:1px solid #3a3f46; color:#e8eaed; }
-      .flash { margin:12px 0; padding:10px 12px; border-radius:10px; background:#143d1f; border:1px solid #235a2f; }
-      .error { background:#3d1414; border-color:#5a2323; }
-      small.muted { color:#9aa0a6; }
-      @media (max-width: 800px) { .row { grid-template-columns:1fr; } }
+  :root { color-scheme: light dark; }
+
+  body {
+    font-family: system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+    margin: 0;
+    padding: 0;
+    background: #0b0d10;
+    color: #e8eaed;
+  }
+
+  .wrap {
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: 24px;
+  }
+
+  .card {
+    background: #111418;
+    border: 1px solid #22252a;
+    border-radius: 16px;
+    padding: 20px;
+  }
+
+  label {
+    display: block;
+    margin-bottom: 6px;
+    font-weight: 600;
+  }
+
+  input, select, textarea {
+    width: 100%;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid #30343a;
+    background: #0c0f13;
+    color: #e8eaed;
+  }
+
+  input[type=file] { padding: 8px; }
+  textarea { min-height: 110px; }
+
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+  .checks {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 12px;
+  }
+
+  .check-item {
+    border: 1px solid #22252a;
+    border-radius: 12px;
+    padding: 10px;
+    background: #0c0f13;
+  }
+
+  .btn {
+    display: inline-block;
+    padding: 10px 16px;
+    border-radius: 10px;
+    border: 1px solid #3a6df0;
+    background: #2a5ae8;
+    color: white;
+    text-decoration: none;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: center;
+  }
+
+  .btn.secondary {
+    background: transparent;
+    border: 1px solid #3a3f46;
+    color: #e8eaed;
+  }
+
+  .flash {
+    margin: 12px 0;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: #143d1f;
+    border: 1px solid #235a2f;
+  }
+
+  .error {
+    background: #3d1414;
+    border-color: #5a2323;
+  }
+
+  small.muted { color: #9aa0a6; }
+
+  /* ---- Login Page Styling ---- */
+  .login {
+    max-width: 560px;
+    margin: 0 auto;
+    text-align: center;
+  }
+
+  .logo {
+    max-height: 80px;
+    width: auto;
+    display: block;
+    margin: 0 auto 16px;
+    border-radius: 8px;
+  }
+
+  .login h2 {
+    margin: 4px 0 10px;
+    font-size: 1.3rem;
+    font-weight: 700;
+    line-height: 1.3;
+  }
+
+  .intro {
+    color: #c7cbd1;
+    background: #0c1015;
+    border: 1px solid #22252a;
+    padding: 12px 14px;
+    border-radius: 12px;
+    text-align: left;
+    margin: 12px 0 18px;
+  }
+
+  .intro strong {
+    color: #ffffff;
+  }
+
+  .badge-req {
+    display: inline-block;
+    font-size: .75rem;
+    border: 1px solid #3a6df0;
+    color: #cfe0ff;
+    background: #112046;
+    padding: 3px 8px;
+    border-radius: 999px;
+    margin-left: 6px;
+  }
+
+  @media (max-width: 800px) {
+    .row { grid-template-columns: 1fr; }
+    .logo { max-height: 64px; }
+  }
     </style>
   </head>
   <body>
@@ -317,12 +436,27 @@ BASE_HTML = """
 PIN_HTML = """
 {% extends "base.html" %}
 {% block content %}
-  <h2>Enter PIN</h2>
-  <form method="post" style="margin-top:12px;">
-    <label for="pin">PIN Code</label>
-    <input id="pin" name="pin" type="text" inputmode="numeric" autofocus />
-    <button class="btn" type="submit" style="margin-top:8px;">Continue</button>
-  </form>
+  <div class="login">
+    {% if logo_url %}
+      <img class="logo" src="{{ logo_url }}" alt="Taylor Roofing Services Ltd logo">
+    {% endif %}
+    <h2>Taylor roofing services ltd - Company vehicle check.</h2>
+
+    <div class="intro">
+      <strong>Welcome.</strong>
+      <div style="margin-top:6px;">
+        Please submit a minimum of <strong>1 vehicle check per month</strong>.
+        Any <strong>accidents</strong> or <strong>urgent defects</strong> must be reported immediately.
+      </div>
+    </div>
+
+    <form method="post" autocomplete="off">
+      <label for="pin">PIN Code <span class="badge-req">Required</span></label>
+      <input id="pin" name="pin" type="password" inputmode="numeric" autofocus
+             placeholder="Enter your company PIN"/>
+      <button class="btn" type="submit" style="margin-top:10px; width:100%;">Continue</button>
+    </form>
+  </div>
 {% endblock %}
 """
 
@@ -460,7 +594,12 @@ app.jinja_loader = DictLoader({"base.html": BASE_HTML})
 
 @app.context_processor
 def inject_globals():
-    return {"app_name": APP_NAME, "db_enabled": db_enabled, "db_error": db_error}
+    return {
+        "app_name": APP_NAME,
+        "db_enabled": db_enabled,
+        "db_error": db_error,
+        "logo_url": LOGO_URL,
+    }
 
 @app.route("/")
 def index():

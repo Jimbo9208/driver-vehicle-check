@@ -46,7 +46,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 RUNNING_ON_RENDER = os.getenv("RENDER", "") != ""
 CLEANUP_LEGACY = os.getenv("CLEANUP_LEGACY", "0") == "1"
 LOGO_URL = os.getenv("LOGO_URL", "https://drive.google.com/uc?export=view&id=1djWHjQFdDGO7qvrd4iMYTN8wpCiV_FD0")
- 
+
 # Google Drive
 GDRIVE_ROOT = os.getenv("GDRIVE_ROOT", "Vehicle Checks")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")  # JSON blob in env (optional)
@@ -948,9 +948,10 @@ def check():
         f_dash = request.files.get("photo_dashboard")
         f_front = request.files.get("photo_front")
         f_rear = request.files.get("photo_rear")
+
         if not (f_dash and f_dash.filename and f_front and f_front.filename and f_rear and f_rear.filename):
-        flash("Dashboard, Front, and Rear photos are required.", "error")
-        return render_template_string(CHECK_HTML, title="Vehicle Check", checklist=checklist_items)
+            flash("Dashboard, Front, and Rear photos are required.", "error")
+            return render_template_string(CHECK_HTML, title="Vehicle Check", checklist=checklist_items)
 
         # Prepare Drive
         drive = _load_drive_service()
@@ -1004,7 +1005,7 @@ def check():
                 new_id = 0  # in-memory mode not used for Drive, but keep placeholder
         except OperationalError as e:
             flash(f"Database error: {e}", "error")
-            return render_template_string(CHECK_HTML, title="Vehicle Check", checklist=checklist_items)
+    return render_template_string(CHECK_HTML, title="Vehicle Check", checklist=checklist_items)
 
         # Build & upload PDF summary
         check_payload = {

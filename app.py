@@ -949,8 +949,8 @@ def check():
         f_front = request.files.get("photo_front")
         f_rear = request.files.get("photo_rear")
         if not (f_dash and f_dash.filename and f_front and f_front.filename and f_rear and f_rear.filename):
-            flash("Dashboard, Front, and Rear photos are required.", "error")
-            return render_template_string(CHECK_HTML, title="Vehicle Check", checklist=checklist_items)
+        flash("Dashboard, Front, and Rear photos are required.", "error")
+        return render_template_string(CHECK_HTML, title="Vehicle Check", checklist=checklist_items)
 
         # Prepare Drive
         drive = _load_drive_service()

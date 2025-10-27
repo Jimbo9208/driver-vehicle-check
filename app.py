@@ -697,6 +697,114 @@ CHECK_HTML = r"""
 {% endblock %}
 """
 
+SUMMARY_PDF_HTML = r"""
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    @page { margin: 22mm 18mm; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif; color:#111; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    h2 { font-size: 15px; margin: 18px 0 8px; }
+    p, li, td, th { font-size: 12px; line-height: 1.45; }
+    small { color:#666; }
+
+    .header { display:flex; justify-content:space-between; align-items:flex-end; border-bottom: 2px solid #e6e8eb; padding-bottom:10px; margin-bottom:12px; }
+    .brand { font-weight:700; }
+    .meta { text-align:right; }
+    .meta p { margin:0; }
+
+    .badge-row { margin: 10px 0 0; color:#333; }
+    .badge { display:inline-block; padding:4px 10px; border-radius:999px; background:#f3f4f6; margin-right:6px; font-size:11px; }
+    .badge.issue { background:#fdecea; color:#b71c1c; font-weight:700; }
+    .badge.ok { background:#e8f5e9; color:#1b5e20; }
+
+    table { width:100%; border-collapse: collapse; margin-top:10px; }
+    th, td { border-bottom:1px solid #eceff3; padding:8px 8px; vertical-align:top; }
+    th { background:#f7f9fb; text-align:left; font-weight:700; }
+    tr.issue-row { background:#fff6f6; }
+
+    .status-pill { display:inline-block; min-width:56px; padding:3px 8px; border-radius:999px; text-align:center; font-weight:700; }
+    .status-ok    { background:#e8f5e9; color:#1b5e20; border:1px solid #b7dfbf; }
+    .status-issue { background:#fdecea; color:#b71c1c; border:1px solid #f1b5b2; }
+
+    .muted { color:#666; }
+    .block { margin: 8px 0; }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <div>
+      <div class="brand">Driver / Vehicle Check — <span class="muted">Vehicle Check Summary</span></div>
+      <h1>{{ vehicle_reg }}</h1>
+    </div>
+    <div class="meta">
+      <p><small>Submitted:</small> {{ created_at }}</p>
+      <p><small>Driver:</small> {{ driver_name }}</p>
+      <p><small>Mileage:</small> {{ mileage or "—" }}</p>
+      <p><small>Follow-up Required:</small> {{ follow_up }}</p>
+    </div>
+  </div>
+
+  <div class="badge-row">
+    <span class="badge issue">{{ issue_count }} Issue{{ '' if issue_count==1 else 's' }}</span>
+    <span class="badge ok">{{ ok_count }} OK</span>
+    <span class="badge"><b>Total:</b> {{ total_checks }}</span>
+  </div>
+
+  <h2>Checklist</h2>
+  <table>
+    <thead>
+      <tr>
+        <th style="width:70%;">Item</th>
+        <th style="width:30%;">Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for label, result in checklist.items() %}
+        {% set is_issue = (result or '')|lower != 'ok' %}
+        <tr class="{{ 'issue-row' if is_issue else '' }}">
+          <td>{{ label }}</td>
+          <td>
+            {% if is_issue %}
+              <span class="status-pill status-issue">Issue</span>
+            {% else %}
+              <span class="status-pill status-ok">OK</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Photos</h2>
+  <div class="block">
+    <p>
+      <b>Drive Folder:</b> <a href="{{ folder_link }}">open</a><br/>
+      <b>Dashboard:</b> <a href="{{ dash_link }}">open</a> &nbsp;|&nbsp;
+      <b>Front:</b> <a href="{{ front_link }}">open</a> &nbsp;|&nbsp;
+      <b>Rear:</b> <a href="{{ rear_link }}">open</a><br/>
+      <b>Defects:</b>
+      {% if defect_links %}
+        {% for l in defect_links %}
+          <a href="{{ l }}">open</a>{% if not loop.last %}, {% endif %}
+        {% else %} — {% endfor %}
+      {% else %} — {% endif %}
+    </p>
+  </div>
+
+  <h2>Defect Notes</h2>
+  <p class="block">{{ defect_notes or "—" }}</p>
+
+  <h2>Any other comments?</h2>
+  <p class="block">{{ comments or "—" }}</p>
+
+</body>
+</html>
+"""
+
 SUCCESS_HTML = """
 {% extends "base.html" %}
 {% block content %}
@@ -909,29 +1017,33 @@ def check():
 
         # Email notification
         folder_link = f"https://drive.google.com/drive/folders/{folder_id}"
-        html = f"""
-        <h3>{APP_NAME} – Vehicle Check Submitted</h3>
-        <p><b>When:</b> {check_payload['created_at']}</p>
-        <p><b>Driver:</b> {driver_name}<br/>
-           <b>Vehicle:</b> {vehicle_reg} &nbsp; <b>Mileage:</b> {mileage or '—'}<br/>
-           <b>Follow-up:</b> {follow_up}</p>
-        <p><b>Drive Folder:</b> <a href="{folder_link}">{folder_link}</a></p>
-        <p><b>Photos:</b><br/>
-           Dashboard: <a href="{dash_link}">open</a><br/>
-           Front: <a href="{front_link}">open</a><br/>
-           Rear: <a href="{rear_link}">open</a><br/>
-           {"Defects: " + ", ".join(f'<a href="{l}">open</a>' for l in defect_links) if defect_links else "Defects: —"}
-        </p>
-        <p><b>Summary PDF:</b> <a href="{pdf_link}">open</a></p>
-        <hr/>
-        <p><b>Checklist</b></p>
-        <ul>
-            {''.join(f'<li>{k}: {v}</li>' for k,v in checklist.items())}
-        </ul>
-        <p><b>Defect Notes:</b><br/>{(defect_notes or '—').replace('\n','<br/>')}</p>
-        <p><b>Any other comments:</b><br/>{(comments or '—').replace('\n','<br/>')}</p>
-        """
-        try:
+        # --- Count totals for PDF summary ---
+        issue_count = sum(1 for v in checklist.values() if (v or "").lower() != "ok")
+        ok_count = sum(1 for v in checklist.values() if (v or "").lower() == "ok")
+        total_checks = len(checklist)
+        # ------------------------------------
+        from flask import render_template_string  # make sure this is at top of file
+
+        html = render_template_string(
+            SUMMARY_PDF_HTML,
+            created_at=check_payload["created_at"],
+            driver_name=driver_name,
+            vehicle_reg=vehicle_reg,
+            mileage=mileage,
+            follow_up=follow_up,
+            checklist=checklist,
+            folder_link=folder_link,
+            dash_link=dash_link,
+            front_link=front_link,
+            rear_link=rear_link,
+            defect_links=defect_links,
+            defect_notes=defect_notes,
+            comments=comments,
+            issue_count=issue_count,
+            ok_count=ok_count,
+            total_checks=total_checks,
+        )
+try:
             send_email(subject=f"{APP_NAME}: {vehicle_reg} check submitted", html_body=html)
         except Exception as e:
             # don't block the flow on email errors

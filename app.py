@@ -460,74 +460,263 @@ PIN_HTML = """
 {% endblock %}
 """
 
-CHECK_HTML = """
+CHECK_HTML = r"""
 {% extends "base.html" %}
 {% block content %}
-  <h2>Daily Vehicle Check</h2>
-  <form method="post" enctype="multipart/form-data" style="margin-top:12px;">
+  <style>
+    :root{
+      --bg:#0f1216; --card:#161a20; --text:#e9eef5; --muted:#9aa3af;
+      --brand:#4aa3ff; --ok:#1bb36b; --warn:#f0b429; --crit:#ef5350; --bar:#263042;
+      --shadow: 0 6px 22px rgba(0,0,0,.25); --radius:16px;
+    }
+    .ui-card{background:var(--card);border:1px solid rgba(140,150,170,.12);border-radius:var(--radius);box-shadow:var(--shadow);padding:14px;margin:12px 0}
+    .tabs{display:flex;gap:8px;margin:10px 0 6px}
+    .tab{flex:1;text-align:center;padding:10px;border-radius:999px;background:#111418;color:var(--muted);border:1px solid rgba(140,150,170,.15)}
+    .tab.active{color:var(--text);border-color:var(--brand)}
+    .progress{margin:10px 0;background:var(--bar);height:10px;border-radius:999px;overflow:hidden}
+    .progress > span{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--brand),#78c3ff);transition:width .2s}
+    .progress-legend{display:flex;justify-content:space-between;font-size:12px;color:var(--muted)}
+    .item{padding:12px;border:1px solid rgba(140,150,170,.15);border-radius:12px;background:#0c0f13;margin:10px 0}
+    .item h4{margin:0 0 8px;font-size:15px}
+    .pill-row{display:flex;gap:8px}
+    .pill{flex:1;text-align:center;padding:12px;border-radius:999px;border:1px solid rgba(140,150,170,.25);background:#12161c;color:var(--text);font-weight:700}
+    .pill.ok{border-color:rgba(27,179,107,.35)} .pill.warn{border-color:rgba(240,180,41,.35)} .pill.crit{border-color:rgba(239,83,80,.35)}
+    .pill.selected.ok{background:rgba(27,179,107,.15)} .pill.selected.warn{background:rgba(240,180,41,.15)} .pill.selected.crit{background:rgba(239,83,80,.18)}
+    .details{display:none;margin-top:10px;border:1px dashed rgba(140,150,170,.25);border-radius:12px;padding:10px;background:rgba(140,150,170,.06)}
+    .footerbar{position:sticky;bottom:0;left:0;right:0;padding-top:8px;background:linear-gradient(to top,#0b0d10 70%,rgba(11,13,16,0))}
+    .navrow{display:flex;gap:8px}
+    .btn.big{padding:14px;border-radius:14px;font-weight:800}
+    .muted{color:var(--muted);font-size:12px}
+  </style>
+
+  <div class="ui-card">
+    <div class="tabs" role="tablist" aria-label="Sections">
+      <button class="tab active" data-jump="#secA">A. Internal</button>
+      <button class="tab" data-jump="#secB">B. External</button>
+      <button class="tab" data-jump="#secC">C. Fluids & Mechanical</button>
+    </div>
+    <div class="progress"><span id="progressBar" style="width:0%"></span></div>
+    <div class="progress-legend"><span id="progressText">0% complete</span><span id="sectionCount">0 / 3 sections done</span></div>
+  </div>
+
+  <form method="post" enctype="multipart/form-data">
+    <!-- Top details (kept same names your backend expects) -->
     <div class="row">
-      <div>
-        <label for="driver_name">Driver Name</label>
-        <input id="driver_name" name="driver_name" required />
-      </div>
-      <div>
-        <label for="vehicle_reg">Vehicle Reg</label>
-        <input id="vehicle_reg" name="vehicle_reg" required />
-      </div>
+      <div><label for="driver_name">Driver Name</label><input id="driver_name" name="driver_name" required /></div>
+      <div><label for="vehicle_reg">Vehicle Reg</label><input id="vehicle_reg" name="vehicle_reg" required /></div>
     </div>
     <div class="row" style="margin-top:12px;">
-      <div>
-        <label for="mileage">Mileage (optional)</label>
-        <input id="mileage" name="mileage" />
-      </div>
+      <div><label for="mileage">Mileage</label><input id="mileage" name="mileage" inputmode="numeric" pattern="[0-9]*" /></div>
       <div>
         <label for="follow_up">Requires Follow-up?</label>
         <select id="follow_up" name="follow_up"><option>No</option><option>Yes</option></select>
       </div>
     </div>
 
-    <h3 style="margin-top:16px;">Checklist</h3>
-    <div class="checks">
-      {% for item in checklist %}
-        <div class="check-item">
-          <label>{{ item }}</label>
-          <select name="check__{{ loop.index0 }}">
-            <option>OK</option><option>Issue</option>
-          </select>
-          <input type="hidden" name="check_label__{{ loop.index0 }}" value="{{ item }}"/>
+    <!-- SECTION A -->
+    <section id="secA" class="ui-card" data-section-index="0">
+      <h3 style="margin:0 0 8px;">A. Internal Condition <small class="muted" id="badgeA">0/5</small></h3>
+      {% set A = [
+        "Internal instruments all operational (aircon, satnav, etc.)",
+        "Seatbelts: condition & operation",
+        "Horn operational",
+        "Windscreen & mirrors clear; wipers/washers work",
+        "Dashboard warning lights: none active"
+      ] %}
+      {% for label in A %}
+        <div class="item" data-key="A{{ loop.index0 }}" data-label="{{ label }}">
+          <h4>{{ label }}</h4>
+          <div class="pill-row" role="radiogroup">
+            <button type="button" class="pill ok"  data-val="OK">✅ OK</button>
+            <button type="button" class="pill warn" data-val="Issue">⚠️ Defect</button>
+            <button type="button" class="pill crit" data-val="Issue">❌ Critical</button>
+          </div>
+          <!-- Hidden inputs your backend expects -->
+          <input type="hidden" name="check__{{ loop.index0 }}" value="" />
+          <input type="hidden" name="check_label__{{ loop.index0 }}" value="{{ label }}" />
+          <div class="details">
+            <label class="muted">Notes (required for ⚠️/❌)</label>
+            <textarea></textarea>
+          </div>
         </div>
       {% endfor %}
+    </section>
+
+    <!-- SECTION B -->
+    <section id="secB" class="ui-card" data-section-index="1">
+      <h3 style="margin:0 0 8px;">B. External Condition <small class="muted" id="badgeB">0/5</small></h3>
+      {% set B = [
+        "No damage to bodywork or bumpers",
+        "Lights & indicators operational",
+        "Number plates clean / visible",
+        "Tyres: tread, pressure, no cuts/bulges",
+        "Glass & lenses intact (no cracks)"
+      ] %}
+      {% for label in B %}
+        <div class="item" data-key="B{{ loop.index0 }}" data-label="{{ label }}">
+          <h4>{{ label }}</h4>
+          <div class="pill-row" role="radiogroup">
+            <button type="button" class="pill ok"  data-val="OK">✅ OK</button>
+            <button type="button" class="pill warn" data-val="Issue">⚠️ Defect</button>
+            <button type="button" class="pill crit" data-val="Issue">❌ Critical</button>
+          </div>
+          <input type="hidden" name="check__{{ 5 + loop.index0 }}" value="" />
+          <input type="hidden" name="check_label__{{ 5 + loop.index0 }}" value="{{ label }}" />
+          <div class="details">
+            <label class="muted">Notes (required for ⚠️/❌)</label>
+            <textarea></textarea>
+          </div>
+        </div>
+      {% endfor %}
+    </section>
+
+    <!-- SECTION C -->
+    <section id="secC" class="ui-card" data-section-index="2">
+      <h3 style="margin:0 0 8px;">C. Fluids & Mechanical <small class="muted" id="badgeC">0/5</small></h3>
+      {% set C = [
+        "Engine oil level OK (no leaks)",
+        "Coolant level OK",
+        "Screenwash level OK",
+        "Brakes feel & fluid (no warning)",
+        "Steering & suspension: no issues"
+      ] %}
+      {% for label in C %}
+        <div class="item" data-key="C{{ loop.index0 }}" data-label="{{ label }}">
+          <h4>{{ label }}</h4>
+          <div class="pill-row" role="radiogroup">
+            <button type="button" class="pill ok"  data-val="OK">✅ OK</button>
+            <button type="button" class="pill warn" data-val="Issue">⚠️ Defect</button>
+            <button type="button" class="pill crit" data-val="Issue">❌ Critical</button>
+          </div>
+          <input type="hidden" name="check__{{ 10 + loop.index0 }}" value="" />
+          <input type="hidden" name="check_label__{{ 10 + loop.index0 }}" value="{{ label }}" />
+          <div class="details">
+            <label class="muted">Notes (required for ⚠️/❌)</label>
+            <textarea></textarea>
+          </div>
+        </div>
+      {% endfor %}
+    </section>
+
+    <!-- Photos (names unchanged to satisfy your validators) -->
+    <div class="ui-card">
+      <h3 style="margin:0 0 10px;">Photos</h3>
+      <div class="row">
+        <div>
+          <label>Dashboard / Mileage (required)</label>
+          <input type="file" name="photo_dashboard" accept="image/*" capture="environment" required />
+        </div>
+        <div>
+          <label>Front of Vehicle (required)</label>
+          <input type="file" name="photo_front" accept="image/*" capture="environment" required />
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px;">
+        <div>
+          <label>Rear of Vehicle (required)</label>
+          <input type="file" name="photo_rear" accept="image/*" capture="environment" required />
+        </div>
+        <div>
+          <label>Damage / Defects (optional, multiple)</label>
+          <input type="file" name="photo_defects" accept="image/*" multiple />
+        </div>
+      </div>
+      <p class="muted" style="margin-top:8px;">Front & dashboard photos are always required for evidence. Rear is required for full set.</p>
     </div>
 
-    <div style="margin-top:16px;">
-      <label for="defect_notes">Defect Notes (if any)</label>
-      <textarea id="defect_notes" name="defect_notes" placeholder="Describe any issues..."></textarea>
+    <div class="footerbar">
+      <div class="navrow">
+        <button type="button" class="btn secondary big" id="prevBtn">Back</button>
+        <button type="button" class="btn big" id="nextBtn">Next</button>
+      </div>
+      <button class="btn" type="submit" style="margin-top:10px;width:100%;">Submit Check</button>
     </div>
-
-    <h3 style="margin-top:16px;">Photos</h3>
-    <div class="row">
-      <div>
-        <label>Dashboard / Mileage (required)</label>
-        <input type="file" name="photo_dashboard" accept="image/*" capture="environment" required />
-      </div>
-      <div>
-        <label>Front of Vehicle (required)</label>
-        <input type="file" name="photo_front" accept="image/*" capture="environment" required />
-      </div>
-    </div>
-    <div class="row" style="margin-top:12px;">
-      <div>
-        <label>Rear of Vehicle (required)</label>
-        <input type="file" name="photo_rear" accept="image/*" capture="environment" required />
-      </div>
-      <div>
-        <label>Damage / Defects (optional, you can select multiple)</label>
-        <input type="file" name="photo_defects" accept="image/*" multiple />
-      </div>
-    </div>
-
-    <button class="btn" type="submit" style="margin-top:16px;">Submit Check</button>
   </form>
+
+  <script>
+    const sections = Array.from(document.querySelectorAll('section.ui-card'));
+    const tabs = Array.from(document.querySelectorAll('.tab'));
+    const progressBar = document.getElementById('progressBar');
+    const progressText = document.getElementById('progressText');
+    const sectionCount = document.getElementById('sectionCount');
+    const prevBtn = document.getElementById('prevBtn');
+    const nextBtn = document.getElementById('nextBtn');
+
+    let currentIndex = 0;
+
+    function updateBadgesAndProgress(){
+      let total = 0, done = 0;
+      sections.forEach((sec, i)=>{
+        const items = sec.querySelectorAll('.item');
+        let completed = 0, count = items.length;
+        items.forEach(it=>{
+          total++;
+          const hidden = it.querySelector('input[type=hidden][name^="check__"]');
+          if(hidden && hidden.value){ completed++; done++; }
+        });
+        const badgeEl = sec.querySelector('small.muted[id^="badge"]');
+        if(badgeEl) badgeEl.textContent = `${completed}/${count}`;
+      });
+      const pct = Math.round((done/total)*100) || 0;
+      progressBar.style.width = pct + '%';
+      progressText.textContent = pct + '% complete';
+      const secDone = sections.filter(sec=>{
+        const items = sec.querySelectorAll('.item');
+        return Array.from(items).every(it=> it.querySelector('input[name^="check__"]').value);
+      }).length;
+      sectionCount.textContent = `${secDone} / ${sections.length} sections done`;
+      nextBtn.textContent = (currentIndex === sections.length-1) ? 'Finish' : 'Next';
+    }
+
+    // pill selection maps to hidden field values ("OK" / "Issue")
+    document.querySelectorAll('.item').forEach((item)=>{
+      const pills = item.querySelectorAll('.pill');
+      const details = item.querySelector('.details');
+      const hiddenVal = item.querySelector('input[type=hidden][name^="check__"]');
+      pills.forEach(p=>{
+        p.addEventListener('click', ()=>{
+          pills.forEach(x=> x.classList.remove('selected'));
+          p.classList.add('selected');
+          hiddenVal.value = p.dataset.val; // "OK" or "Issue"
+          // Show notes section if Issue selected
+          if(p.classList.contains('warn') || p.classList.contains('crit')){
+            details.style.display = 'block';
+          } else {
+            details.style.display = 'none';
+          }
+          updateBadgesAndProgress();
+        });
+      });
+    });
+
+    // Tabs and next/back
+    function jumpTo(sel){
+      tabs.forEach(t=> t.classList.remove('active'));
+      const i = ['#secA','#secB','#secC'].indexOf(sel);
+      if(i>=0) tabs[i].classList.add('active');
+      document.querySelector(sel).scrollIntoView({behavior:'smooth', block:'start'});
+      currentIndex = i;
+      updateBadgesAndProgress();
+    }
+    tabs.forEach(t=> t.addEventListener('click', ()=> jumpTo(t.dataset.jump)));
+
+    function go(delta){
+      currentIndex = Math.min(Math.max(currentIndex + delta, 0), sections.length-1);
+      const target = ['#secA','#secB','#secC'][currentIndex];
+      jumpTo(target);
+    }
+    prevBtn.addEventListener('click', ()=> go(-1));
+    nextBtn.addEventListener('click', ()=> {
+      if(currentIndex === sections.length-1){
+        // UX hint only; actual submit is the main button
+        alert('Checks complete. Press "Submit Check" to upload photos and send the email.');
+      } else {
+        go(1);
+      }
+    });
+
+    updateBadgesAndProgress();
+  </script>
 {% endblock %}
 """
 
@@ -627,10 +816,24 @@ def check():
         return redirect(url_for("pin"))
 
     checklist_items = [
-        "Tyres & tread", "Lights & indicators", "Brakes", "Horn", "Mirrors",
-        "Windscreen & wipers", "Screenwash", "Oil level", "Coolant level",
-        "Seatbelts", "Doors secure", "Loads secured",
-        "Bodywork damage", "Interior clean", "Exterior clean",
+        # A. Internal
+        "Internal instruments all operational (aircon, satnav, etc.)",
+        "Seatbelts: condition & operation",
+        "Horn operational",
+        "Windscreen & mirrors clear; wipers/washers work",
+        "Dashboard warning lights: none active",
+        # B. External
+        "No damage to bodywork or bumpers",
+        "Lights & indicators operational",
+        "Number plates clean / visible",
+        "Tyres: tread, pressure, no cuts/bulges",
+        "Glass & lenses intact (no cracks)",
+        # C. Fluids & Mechanical
+        "Engine oil level OK (no leaks)",
+        "Coolant level OK",
+        "Screenwash level OK",
+        "Brakes feel & fluid (no warning)",
+        "Steering & suspension: no issues",
     ]
 
     if request.method == "POST":

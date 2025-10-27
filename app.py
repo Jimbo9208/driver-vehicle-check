@@ -1,13 +1,19 @@
 import os
 import io
 import re
+import pdfkit
 import json
 from datetime import datetime
 from urllib.parse import urlparse
 
 from flask import (
-    Flask, render_template_string, request, redirect, url_for,
-    session, flash
+    Flask,
+    render_template_string,  # keep it here only once
+    request,
+    redirect,
+    url_for,
+    session,
+    flash,
 )
 
 # DB
@@ -1010,7 +1016,7 @@ def check():
             "checklist": checklist,
             "defect_notes": defect_notes,
         }
-        pdf_bytes = build_pdf_summary(check_payload)
+        pdf_bytes = pdfkit.from_string(html, False)  # 'html' is your new rendered template
         pdf_stream = io.BytesIO(pdf_bytes)
         pdf_name = _sanitize_filename(f"{vehicle_reg}_CheckSummary_{ts}.pdf")
         pdf_id, pdf_link = _drive_upload(drive, folder_id, pdf_stream, pdf_name, "application/pdf")
@@ -1022,7 +1028,6 @@ def check():
         ok_count = sum(1 for v in checklist.values() if (v or "").lower() == "ok")
         total_checks = len(checklist)
         # ------------------------------------
-        from flask import render_template_string  # make sure this is at top of file
 
         html = render_template_string(
             SUMMARY_PDF_HTML,

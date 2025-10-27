@@ -483,8 +483,7 @@ CHECK_HTML = r"""
     .pill.ok{border-color:rgba(27,179,107,.35)} .pill.warn{border-color:rgba(240,180,41,.35)} .pill.crit{border-color:rgba(239,83,80,.35)}
     .pill.selected.ok{background:rgba(27,179,107,.15)} .pill.selected.warn{background:rgba(240,180,41,.15)} .pill.selected.crit{background:rgba(239,83,80,.18)}
     .details{display:none;margin-top:10px;border:1px dashed rgba(140,150,170,.25);border-radius:12px;padding:10px;background:rgba(140,150,170,.06)}
-    .footerbar{position:sticky;bottom:0;left:0;right:0;padding-top:8px;background:linear-gradient(to top,#0b0d10 70%,rgba(11,13,16,0))}
-    .navrow{display:flex;gap:8px}
+    .footerbar{padding-top:8px}
     .btn.big{padding:14px;border-radius:14px;font-weight:800}
     .muted{color:var(--muted);font-size:12px}
   </style>
@@ -500,7 +499,7 @@ CHECK_HTML = r"""
   </div>
 
   <form method="post" enctype="multipart/form-data">
-    <!-- Top details (kept same names your backend expects) -->
+    <!-- Top details -->
     <div class="row">
       <div><label for="driver_name">Driver Name</label><input id="driver_name" name="driver_name" required /></div>
       <div><label for="vehicle_reg">Vehicle Reg</label><input id="vehicle_reg" name="vehicle_reg" required /></div>
@@ -531,7 +530,6 @@ CHECK_HTML = r"""
             <button type="button" class="pill warn" data-val="Issue">⚠️ Defect</button>
             <button type="button" class="pill crit" data-val="Issue">❌ Critical</button>
           </div>
-          <!-- Hidden inputs your backend expects -->
           <input type="hidden" name="check__{{ loop.index0 }}" value="" />
           <input type="hidden" name="check_label__{{ loop.index0 }}" value="{{ label }}" />
           <div class="details">
@@ -572,11 +570,12 @@ CHECK_HTML = r"""
 
     <!-- SECTION C -->
     <section id="secC" class="ui-card" data-section-index="2">
-      <h3 style="margin:0 0 8px;">C. Fluids & Mechanical <small class="muted" id="badgeC">0/5</small></h3>
+      <h3 style="margin:0 0 8px;">C. Fluids & Mechanical <small class="muted" id="badgeC">0/6</small></h3>
       {% set C = [
         "Engine oil level OK (no leaks)",
         "Coolant level OK",
         "Screenwash level OK",
+        "AdBlue level OK",
         "Brakes feel & fluid (no warning)",
         "Steering & suspension: no issues"
       ] %}
@@ -598,7 +597,7 @@ CHECK_HTML = r"""
       {% endfor %}
     </section>
 
-    <!-- Photos (names unchanged to satisfy your validators) -->
+    <!-- Photos -->
     <div class="ui-card">
       <h3 style="margin:0 0 10px;">Photos</h3>
       <div class="row">
@@ -621,14 +620,18 @@ CHECK_HTML = r"""
           <input type="file" name="photo_defects" accept="image/*" multiple />
         </div>
       </div>
-      <p class="muted" style="margin-top:8px;">Front & dashboard photos are always required for evidence. Rear is required for full set.</p>
+      <p class="muted" style="margin-top:8px;">
+        Minimum of front, rear & dashboard photos are required. Any damage or defect needs a separate photo uploading on the damage/defect photo option.
+      </p>
+    </div>
+
+    <!-- Any other comments -->
+    <div class="ui-card">
+      <h3 style="margin:0 0 10px;">Any other comments?</h3>
+      <textarea name="comments" placeholder="Enter any additional comments here..." style="width:100%;min-height:80px;border-radius:12px;border:1px solid rgba(140,150,170,.25);padding:10px;background:transparent;color:var(--text);"></textarea>
     </div>
 
     <div class="footerbar">
-      <div class="navrow">
-        <button type="button" class="btn secondary big" id="prevBtn">Back</button>
-        <button type="button" class="btn big" id="nextBtn">Next</button>
-      </div>
       <button class="btn" type="submit" style="margin-top:10px;width:100%;">Submit Check</button>
     </div>
   </form>
@@ -639,46 +642,39 @@ CHECK_HTML = r"""
     const progressBar = document.getElementById('progressBar');
     const progressText = document.getElementById('progressText');
     const sectionCount = document.getElementById('sectionCount');
-    const prevBtn = document.getElementById('prevBtn');
-    const nextBtn = document.getElementById('nextBtn');
-
-    let currentIndex = 0;
 
     function updateBadgesAndProgress(){
       let total = 0, done = 0;
-      sections.forEach((sec, i)=>{
+      sections.forEach((sec)=>{
         const items = sec.querySelectorAll('.item');
-        let completed = 0, count = items.length;
+        let completed = 0;
         items.forEach(it=>{
           total++;
-          const hidden = it.querySelector('input[type=hidden][name^="check__"]');
+          const hidden = it.querySelector('input[name^=\"check__\"]');
           if(hidden && hidden.value){ completed++; done++; }
         });
-        const badgeEl = sec.querySelector('small.muted[id^="badge"]');
-        if(badgeEl) badgeEl.textContent = `${completed}/${count}`;
+        const badgeEl = sec.querySelector('small.muted[id^=\"badge\"]');
+        if(badgeEl) badgeEl.textContent = `${completed}/${items.length}`;
       });
       const pct = Math.round((done/total)*100) || 0;
       progressBar.style.width = pct + '%';
       progressText.textContent = pct + '% complete';
       const secDone = sections.filter(sec=>{
         const items = sec.querySelectorAll('.item');
-        return Array.from(items).every(it=> it.querySelector('input[name^="check__"]').value);
+        return Array.from(items).every(it=> it.querySelector('input[name^=\"check__\"]').value);
       }).length;
       sectionCount.textContent = `${secDone} / ${sections.length} sections done`;
-      nextBtn.textContent = (currentIndex === sections.length-1) ? 'Finish' : 'Next';
     }
 
-    // pill selection maps to hidden field values ("OK" / "Issue")
-    document.querySelectorAll('.item').forEach((item)=>{
+    document.querySelectorAll('.item').forEach(item=>{
       const pills = item.querySelectorAll('.pill');
       const details = item.querySelector('.details');
-      const hiddenVal = item.querySelector('input[type=hidden][name^="check__"]');
+      const hiddenVal = item.querySelector('input[name^=\"check__\"]');
       pills.forEach(p=>{
         p.addEventListener('click', ()=>{
           pills.forEach(x=> x.classList.remove('selected'));
           p.classList.add('selected');
-          hiddenVal.value = p.dataset.val; // "OK" or "Issue"
-          // Show notes section if Issue selected
+          hiddenVal.value = p.dataset.val;
           if(p.classList.contains('warn') || p.classList.contains('crit')){
             details.style.display = 'block';
           } else {
@@ -689,31 +685,12 @@ CHECK_HTML = r"""
       });
     });
 
-    // Tabs and next/back
-    function jumpTo(sel){
-      tabs.forEach(t=> t.classList.remove('active'));
-      const i = ['#secA','#secB','#secC'].indexOf(sel);
-      if(i>=0) tabs[i].classList.add('active');
-      document.querySelector(sel).scrollIntoView({behavior:'smooth', block:'start'});
-      currentIndex = i;
+    tabs.forEach(t=> t.addEventListener('click', ()=>{
+      tabs.forEach(x=> x.classList.remove('active'));
+      t.classList.add('active');
+      document.querySelector(t.dataset.jump).scrollIntoView({behavior:'smooth', block:'start'});
       updateBadgesAndProgress();
-    }
-    tabs.forEach(t=> t.addEventListener('click', ()=> jumpTo(t.dataset.jump)));
-
-    function go(delta){
-      currentIndex = Math.min(Math.max(currentIndex + delta, 0), sections.length-1);
-      const target = ['#secA','#secB','#secC'][currentIndex];
-      jumpTo(target);
-    }
-    prevBtn.addEventListener('click', ()=> go(-1));
-    nextBtn.addEventListener('click', ()=> {
-      if(currentIndex === sections.length-1){
-        // UX hint only; actual submit is the main button
-        alert('Checks complete. Press "Submit Check" to upload photos and send the email.');
-      } else {
-        go(1);
-      }
-    });
+    }));
 
     updateBadgesAndProgress();
   </script>
@@ -841,6 +818,7 @@ def check():
         vehicle_reg = request.form.get("vehicle_reg", "").strip().upper()
         mileage = request.form.get("mileage", "").strip()
         follow_up = request.form.get("follow_up", "No").strip() or "No"
+        comments = (request.form.get("comments") or "").strip()
         defect_notes = request.form.get("defect_notes", "").strip()
 
         # Build checklist dict
@@ -951,6 +929,7 @@ def check():
             {''.join(f'<li>{k}: {v}</li>' for k,v in checklist.items())}
         </ul>
         <p><b>Defect Notes:</b><br/>{(defect_notes or '—').replace('\n','<br/>')}</p>
+        <p><b>Any other comments:</b><br/>{(comments or '—').replace('\n','<br/>')}</p>
         """
         try:
             send_email(subject=f"{APP_NAME}: {vehicle_reg} check submitted", html_body=html)

@@ -1021,49 +1021,55 @@ def check():
         pdf_name = _sanitize_filename(f"{vehicle_reg}_CheckSummary_{ts}.pdf")
         pdf_id, pdf_link = _drive_upload(drive, folder_id, pdf_stream, pdf_name, "application/pdf")
 
-        # Email notification
-        folder_link = f"https://drive.google.com/drive/folders/{folder_id}"
-        # --- Count totals for PDF summary ---
-        issue_count = sum(1 for v in checklist.values() if (v or "").lower() != "ok")
-        ok_count = sum(1 for v in checklist.values() if (v or "").lower() == "ok")
-        total_checks = len(checklist)
-        # ------------------------------------
+# Email notification
+folder_link = f"https://drive.google.com/drive/folders/{folder_id}"
 
-        html = render_template_string(
-            SUMMARY_PDF_HTML,
-            created_at=check_payload["created_at"],
-            driver_name=driver_name,
-            vehicle_reg=vehicle_reg,
-            mileage=mileage,
-            follow_up=follow_up,
-            checklist=checklist,
-            folder_link=folder_link,
-            dash_link=dash_link,
-            front_link=front_link,
-            rear_link=rear_link,
-            defect_links=defect_links,
-            defect_notes=defect_notes,
-            comments=comments,
-            issue_count=issue_count,
-            ok_count=ok_count,
-            total_checks=total_checks,
-        )
+# --- Count totals for PDF summary ---
+issue_count = sum(1 for v in checklist.values() if (v or "").lower() != "ok")
+ok_count = sum(1 for v in checklist.values() if (v or "").lower() == "ok")
+total_checks = len(checklist)
+# ------------------------------------
+
+# Build the PDF/Email HTML from the new template
+html = render_template_string(
+    SUMMARY_PDF_HTML,
+    created_at=check_payload["created_at"],
+    driver_name=driver_name,
+    vehicle_reg=vehicle_reg,
+    mileage=mileage,
+    follow_up=follow_up,
+    checklist=checklist,
+    folder_link=folder_link,
+    dash_link=dash_link,
+    front_link=front_link,
+    rear_link=rear_link,
+    defect_links=defect_links,
+    defect_notes=defect_notes,
+    comments=comments,
+    issue_count=issue_count,
+    ok_count=ok_count,
+    total_checks=total_checks,
+)
+
+# Send email (use 'html' above as the email body; change if you prefer your old email layout)
 try:
-            send_email(subject=f"{APP_NAME}: {vehicle_reg} check submitted", html_body=html)
-        except Exception as e:
-            # don't block the flow on email errors
-            flash(f"Email send failed: {e}", "error")
+    send_email(subject=f"{APP_NAME}: {vehicle_reg} check submitted", html_body=html)
+except Exception as e:
+    # don't block the flow on email errors
+    flash(f"Email send failed: {e}", "error")
 
-        # Update PDF id into DB
-        if db_enabled and checks_table is not None:
-            try:
-                with engine.begin() as conn:
-                    conn.execute(sqltext("UPDATE vehicle_checks SET pdf_file_id = :pdf WHERE id = :id"),
-                                 {"pdf": pdf_id, "id": new_id})
-            except Exception as e:
-                flash(f"Failed to record PDF id: {e}", "error")
+# Update PDF id into DB
+if db_enabled and checks_table is not None:
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                sqltext("UPDATE vehicle_checks SET pdf_file_id = :pdf WHERE id = :id"),
+                {"pdf": pdf_id, "id": new_id},
+            )
+    except Exception as e:
+        flash(f"Failed to record PDF id: {e}", "error")
 
-        return redirect(url_for("success", check_id=new_id, folder_id=folder_id))
+return redirect(url_for("success", check_id=new_id, folder_id=folder_id))
 
     return render_template_string(CHECK_HTML, title="Vehicle Check", checklist=checklist_items)
 

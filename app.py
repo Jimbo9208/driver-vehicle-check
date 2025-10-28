@@ -1070,7 +1070,7 @@ if db_enabled and checks_table is not None:
     except Exception as e:
         flash(f"Failed to record PDF id: {e}", "error")
 
-return redirect(url_for("success", check_id=new_id, folder_id=folder_id))
+        return redirect(url_for("success", check_id=new_id, folder_id=folder_id))
 
     return render_template_string(CHECK_HTML, title="Vehicle Check", checklist=checklist_items)
 

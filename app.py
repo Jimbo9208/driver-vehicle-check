@@ -23,8 +23,9 @@ from sqlalchemy.sql import select, insert, text as sqltext
 import smtplib
 from email.message import EmailMessage
 
-# Google Drive
-from google.oauth2 import service_account
+# Google Drive (OAuth user auth)
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
@@ -44,8 +45,9 @@ LOGO_URL = os.getenv("LOGO_URL", "https://drive.google.com/uc?export=view&id=1dj
 
 # Google Drive
 GDRIVE_ROOT = os.getenv("GDRIVE_ROOT", "Vehicle Checks")
-GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")  # JSON blob in env (optional)
-GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")  # path to JSON file (e.g., /etc/secrets/xxx.json)
+OAUTH_CLIENT_ID = os.getenv("OAUTH_CLIENT_ID", "")
+OAUTH_CLIENT_SECRET = os.getenv("OAUTH_CLIENT_SECRET", "")
+OAUTH_REFRESH_TOKEN = os.getenv("OAUTH_REFRESH_TOKEN", "")
 
 # Email
 MAIL_HOST = os.getenv("MAIL_HOST")
@@ -125,35 +127,32 @@ init_db()
 
 # ----------------------- Google Drive helpers ---------------------
 def _load_drive_service():
-    """Builds a Drive API service from env or file credentials."""
-    creds = None
-    scopes = ["https://www.googleapis.com/auth/drive"]
-
-    if GOOGLE_SERVICE_ACCOUNT_JSON:
-        # Using JSON blob directly from env
-        try:
-            info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-        except json.JSONDecodeError:
-            # Fallback in case someone pasted Python-like dict text
-            info = json.loads(json.dumps(eval(GOOGLE_SERVICE_ACCOUNT_JSON)))  # nosec - controlled admin env
-        creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
-    elif GOOGLE_APPLICATION_CREDENTIALS and os.path.exists(GOOGLE_APPLICATION_CREDENTIALS):
-        # Using Render secret path to JSON
-        creds = service_account.Credentials.from_service_account_file(
-            GOOGLE_APPLICATION_CREDENTIALS, scopes=scopes
-        )
-    elif os.path.exists("service_account.json"):
-        # Local dev fallback
-        creds = service_account.Credentials.from_service_account_file(
-            "service_account.json", scopes=scopes
-        )
-    else:
+    """Build a Drive API service using OAuth refresh-token auth (recommended for personal Google Drive)."""
+    required = {
+        "OAUTH_CLIENT_ID": OAUTH_CLIENT_ID,
+        "OAUTH_CLIENT_SECRET": OAUTH_CLIENT_SECRET,
+        "OAUTH_REFRESH_TOKEN": OAUTH_REFRESH_TOKEN,
+    }
+    missing = [k for k, v in required.items() if not v]
+    if missing:
         raise RuntimeError(
-            "No Google service account credentials found. "
-            "Set GOOGLE_APPLICATION_CREDENTIALS (file path) or GOOGLE_SERVICE_ACCOUNT_JSON (raw JSON), "
-            "or include service_account.json in the project."
+            "Missing OAuth environment variables for Google Drive: "
+            + ", ".join(missing)
+            + ". Set these in Render and redeploy."
         )
 
+    scopes = ["https://www.googleapis.com/auth/drive"]
+    creds = Credentials(
+        token=None,
+        refresh_token=OAUTH_REFRESH_TOKEN,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=OAUTH_CLIENT_ID,
+        client_secret=OAUTH_CLIENT_SECRET,
+        scopes=scopes,
+    )
+
+    # Force a token refresh now so we fail fast if credentials are wrong
+    creds.refresh(Request())
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 def _drive_find_or_create_folder(drive, name, parent_id=None):
@@ -163,14 +162,23 @@ def _drive_find_or_create_folder(drive, name, parent_id=None):
     if parent_id:
         q_parts.append(f"'{parent_id}' in parents")
     q = " and ".join(q_parts)
-    res = drive.files().list(q=q, fields="files(id,name)").execute()
+    res = drive.files().list(
+        q=q,
+        fields="files(id,name)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+    ).execute()
     files = res.get("files", [])
     if files:
         return files[0]["id"]
     metadata = {"name": name, "mimeType": "application/vnd.google-apps.folder"}
     if parent_id:
         metadata["parents"] = [parent_id]
-    folder = drive.files().create(body=metadata, fields="id").execute()
+    folder = drive.files().create(
+        body=metadata,
+        fields="id",
+        supportsAllDrives=True,
+    ).execute()
     return folder["id"]
 
 def _ensure_check_folder(drive, reg: str, date_str: str):
@@ -186,7 +194,12 @@ def _sanitize_filename(text: str) -> str:
 def _drive_upload(drive, folder_id: str, file_stream: io.BytesIO, filename: str, mimetype: str):
     media = MediaIoBaseUpload(file_stream, mimetype=mimetype, resumable=False)
     body = {"name": filename, "parents": [folder_id]}
-    f = drive.files().create(body=body, media_body=media, fields="id,webViewLink").execute()
+    f = drive.files().create(
+        body=body,
+        media_body=media,
+        fields="id,webViewLink",
+        supportsAllDrives=True,
+    ).execute()
     return f["id"], f.get("webViewLink")
 
 # ----------------------- Email helper ---------------------
@@ -922,6 +935,9 @@ def check():
 
         # Email notification
         folder_link = f"https://drive.google.com/drive/folders/{folder_id}"
+        defect_notes_html = (defect_notes or "—").replace("\n", "<br/>")
+        comments_html = (comments or "—").replace("\n", "<br/>")
+
         html = f"""
         <h3>{APP_NAME} – Vehicle Check Submitted</h3>
         <p><b>When:</b> {check_payload['created_at']}</p>
@@ -941,8 +957,8 @@ def check():
         <ul>
             {''.join(f'<li>{k}: {v}</li>' for k,v in checklist.items())}
         </ul>
-        <p><b>Defect Notes:</b><br/>{(defect_notes or '—').replace('\n','<br/>')}</p>
-        <p><b>Any other comments:</b><br/>{(comments or '—').replace('\n','<br/>')}</p>
+        <p><b>Defect Notes:</b><br/>{defect_notes_html}</p>
+        <p><b>Any other comments:</b><br/>{comments_html}</p>
         """
         try:
             send_email(subject=f"{APP_NAME}: {vehicle_reg} check submitted", html_body=html)

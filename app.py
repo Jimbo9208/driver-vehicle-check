@@ -23,8 +23,8 @@ from sqlalchemy.sql import select, insert, text as sqltext
 import smtplib
 from email.message import EmailMessage
 
-# Google Drive (OAuth user auth)
-from google.oauth2.credentials import Credentials
+# Google Drive (Service Account auth)
+from google.oauth2 import service_account
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
@@ -45,9 +45,7 @@ LOGO_URL = os.getenv("LOGO_URL", "https://drive.google.com/uc?export=view&id=1dj
 
 # Google Drive
 GDRIVE_ROOT = os.getenv("GDRIVE_ROOT", "Vehicle Checks")
-OAUTH_CLIENT_ID = os.getenv("OAUTH_CLIENT_ID", "")
-OAUTH_CLIENT_SECRET = os.getenv("OAUTH_CLIENT_SECRET", "")
-OAUTH_REFRESH_TOKEN = os.getenv("OAUTH_REFRESH_TOKEN", "")
+GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
 
 # Email
 MAIL_HOST = os.getenv("MAIL_HOST")
@@ -127,32 +125,28 @@ init_db()
 
 # ----------------------- Google Drive helpers ---------------------
 def _load_drive_service():
-    """Build a Drive API service using OAuth refresh-token auth (recommended for personal Google Drive)."""
-    required = {
-        "OAUTH_CLIENT_ID": OAUTH_CLIENT_ID,
-        "OAUTH_CLIENT_SECRET": OAUTH_CLIENT_SECRET,
-        "OAUTH_REFRESH_TOKEN": OAUTH_REFRESH_TOKEN,
-    }
-    missing = [k for k, v in required.items() if not v]
-    if missing:
+    """Build a Drive API service using a Google **service account** JSON file.
+
+    Expects Render env var:
+      GOOGLE_APPLICATION_CREDENTIALS=/etc/secrets/<your-service-account>.json
+    """
+
+    if not GOOGLE_APPLICATION_CREDENTIALS:
         raise RuntimeError(
-            "Missing OAuth environment variables for Google Drive: "
-            + ", ".join(missing)
-            + ". Set these in Render and redeploy."
+            "GOOGLE_APPLICATION_CREDENTIALS is not set. "
+            "In Render: Service → Environment → add GOOGLE_APPLICATION_CREDENTIALS "
+            "with value like /etc/secrets/<service-account>.json, then redeploy."
         )
 
     scopes = ["https://www.googleapis.com/auth/drive"]
-    creds = Credentials(
-        token=None,
-        refresh_token=OAUTH_REFRESH_TOKEN,
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=OAUTH_CLIENT_ID,
-        client_secret=OAUTH_CLIENT_SECRET,
+    creds = service_account.Credentials.from_service_account_file(
+        GOOGLE_APPLICATION_CREDENTIALS,
         scopes=scopes,
     )
 
-    # Force a token refresh now so we fail fast if credentials are wrong
+    # Fail fast: mint an access token now so auth issues surface immediately in logs
     creds.refresh(Request())
+
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 def _drive_find_or_create_folder(drive, name, parent_id=None):
